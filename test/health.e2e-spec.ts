@@ -1,5 +1,6 @@
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import type { Server } from 'node:http';
 import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
@@ -13,7 +14,10 @@ interface HealthResponseBody {
 }
 
 describe('GET /health', () => {
-  let app: INestApplication;
+  // Typing the server explicitly propagates through getHttpServer() below,
+  // instead of leaving it (and the request(...) argument built from it) as
+  // `any`.
+  let app: INestApplication<Server>;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
