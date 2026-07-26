@@ -9,9 +9,15 @@ import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 
 import { describeError } from '../describe-error';
+import { withTimeout } from '../with-timeout';
 import type { Env } from '../config/env.schema';
 
 export const REDIS = Symbol('REDIS');
+
+// quit() waits for Redis to reply to the QUIT command. Against a frozen
+// dependency that reply never comes, which would otherwise hang shutdown
+// indefinitely; bounding it lets the process exit on schedule instead.
+const SHUTDOWN_TIMEOUT_MS = 3_000;
 
 @Global()
 @Module({
@@ -39,9 +45,17 @@ export const REDIS = Symbol('REDIS');
   exports: [REDIS],
 })
 export class RedisModule implements OnApplicationShutdown {
+  private readonly logger = new Logger('Redis');
+
   constructor(@Inject(REDIS) private readonly client: Redis) {}
 
   async onApplicationShutdown(): Promise<void> {
-    await this.client.quit();
+    try {
+      await withTimeout(this.client.quit(), SHUTDOWN_TIMEOUT_MS);
+    } catch (error) {
+      this.logger.warn(
+        `client did not close within ${SHUTDOWN_TIMEOUT_MS}ms: ${describeError(error)}`,
+      );
+    }
   }
 }

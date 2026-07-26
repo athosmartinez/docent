@@ -10,10 +10,17 @@ import { Kysely, PostgresDialect } from 'kysely';
 import { Pool } from 'pg';
 
 import { describeError } from '../describe-error';
+import { withTimeout } from '../with-timeout';
 import type { Env } from '../config/env.schema';
 import type { DB } from './schema';
 
 export const KYSELY = Symbol('KYSELY');
+
+// Kysely.destroy() -> pool.end() waits for every checked-out client to be
+// released. A client stuck mid-query against a frozen dependency never
+// releases, which would otherwise hang shutdown indefinitely; bounding it
+// lets the process exit on schedule instead.
+const SHUTDOWN_TIMEOUT_MS = 3_000;
 
 @Global()
 @Module({
@@ -44,9 +51,17 @@ export const KYSELY = Symbol('KYSELY');
   exports: [KYSELY],
 })
 export class DatabaseModule implements OnApplicationShutdown {
+  private readonly logger = new Logger('Database');
+
   constructor(@Inject(KYSELY) private readonly db: Kysely<DB>) {}
 
   async onApplicationShutdown(): Promise<void> {
-    await this.db.destroy();
+    try {
+      await withTimeout(this.db.destroy(), SHUTDOWN_TIMEOUT_MS);
+    } catch (error) {
+      this.logger.warn(
+        `pool did not close within ${SHUTDOWN_TIMEOUT_MS}ms: ${describeError(error)}`,
+      );
+    }
   }
 }
