@@ -43,4 +43,41 @@ describe('describeError', () => {
     expect(describeError('').length).toBeGreaterThan(0);
     expect(describeError(new Error('')).length).toBeGreaterThan(0);
   });
+
+  it('handles a null-prototype object with no properties to read', () => {
+    expect(describeError(Object.create(null)).length).toBeGreaterThan(0);
+  });
+
+  it('handles a non-callable toString alongside an empty message', () => {
+    const error = { toString: null, message: '' };
+
+    expect(describeError(error).length).toBeGreaterThan(0);
+  });
+
+  it('handles a Symbol.toPrimitive that throws', () => {
+    const error = {
+      [Symbol.toPrimitive]() {
+        throw new Error('x');
+      },
+    };
+
+    expect(describeError(error).length).toBeGreaterThan(0);
+  });
+
+  it('handles a message getter that throws', () => {
+    const error = {
+      get message(): string {
+        throw new Error('x');
+      },
+    };
+
+    expect(describeError(error).length).toBeGreaterThan(0);
+  });
+
+  it('handles a circular structure without throwing or hanging', () => {
+    const error: Record<string, unknown> = { message: 'circular' };
+    error.self = error;
+
+    expect(describeError(error)).toBe('circular');
+  });
 });
