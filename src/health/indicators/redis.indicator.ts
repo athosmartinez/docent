@@ -5,6 +5,7 @@ import {
 } from '@nestjs/terminus';
 import type Redis from 'ioredis';
 
+import { describeError } from '../../common/describe-error';
 import { REDIS } from '../../common/redis/redis.module';
 import { withTimeout } from '../../common/with-timeout';
 
@@ -24,9 +25,7 @@ export class RedisHealthIndicator {
       await withTimeout(this.client.ping(), PROBE_TIMEOUT_MS);
       return indicator.up();
     } catch (error) {
-      return indicator.down(
-        error instanceof Error ? error.message : 'unreachable',
-      );
+      return indicator.down(describeError(error));
     }
   }
 }

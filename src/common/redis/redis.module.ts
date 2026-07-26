@@ -8,6 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 
+import { describeError } from '../describe-error';
 import type { Env } from '../config/env.schema';
 
 export const REDIS = Symbol('REDIS');
@@ -27,7 +28,9 @@ export const REDIS = Symbol('REDIS');
         // with no listener for that event throws, which would take the process
         // down in exactly the situation the health check exists to report.
         const logger = new Logger('Redis');
-        client.on('error', (error: Error) => logger.warn(error.message));
+        client.on('error', (error: unknown) =>
+          logger.warn(describeError(error)),
+        );
 
         return client;
       },

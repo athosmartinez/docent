@@ -7,6 +7,7 @@ import { Kysely, sql } from 'kysely';
 
 import { KYSELY } from '../../common/database/database.module';
 import type { DB } from '../../common/database/schema';
+import { describeError } from '../../common/describe-error';
 import { withTimeout } from '../../common/with-timeout';
 
 const PROBE_TIMEOUT_MS = 3_000;
@@ -25,9 +26,7 @@ export class DatabaseHealthIndicator {
       await withTimeout(sql`select 1`.execute(this.db), PROBE_TIMEOUT_MS);
       return indicator.up();
     } catch (error) {
-      return indicator.down(
-        error instanceof Error ? error.message : 'unreachable',
-      );
+      return indicator.down(describeError(error));
     }
   }
 }
