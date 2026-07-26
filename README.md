@@ -101,7 +101,23 @@ Verify it came up:
 
 ```bash
 curl localhost:3000/health
-# {"status":"ok","info":{"database":{"status":"up"},"redis":{"status":"up"}}}
+```
+
+Terminus reports `status`, `info`, `error` and `details` — `error` and `details` are present (as `{}` / mirrored `info`) even when everything is healthy:
+
+```json
+{
+  "status": "ok",
+  "info": {
+    "database": { "status": "up" },
+    "redis": { "status": "up" }
+  },
+  "error": {},
+  "details": {
+    "database": { "status": "up" },
+    "redis": { "status": "up" }
+  }
+}
 ```
 
 > 🚧 Planned — ingestion (M1) and querying (M2) are not implemented yet.
