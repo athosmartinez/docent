@@ -74,7 +74,7 @@ flowchart TB
 
 ## Tech stack
 
-- **Runtime / framework:** Node.js · TypeScript · Nest.js
+- **Runtime / framework:** Node.js 24 LTS · TypeScript (strict) · Nest.js
 - **Storage / vectors:** PostgreSQL + pgvector · Redis (cache)
 - **LLM access:** OpenAI-compatible SDKs · OpenRouter
 - **Agent tooling / MCP:** `@modelcontextprotocol/sdk`
@@ -85,9 +85,13 @@ flowchart TB
 
 ## Getting started
 
+**Requirements:** Node **24 LTS** (pinned in `.nvmrc`) and Docker.
+
 ```bash
 git clone https://github.com/athosmartinez/docent.git
 cd docent
+
+nvm use                       # Node 24 — other majors will fail in confusing ways
 
 cp .env.example .env          # database and redis connection strings
 docker compose up -d          # PostgreSQL + pgvector + Redis

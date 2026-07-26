@@ -137,3 +137,7 @@ dist
 
 # Pasta de planejamento pessoal (não versionar)
 /_planning/
+
+# Editor directories
+.vscode/
+.idea/
