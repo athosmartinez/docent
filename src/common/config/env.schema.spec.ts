@@ -3,6 +3,7 @@ import { validateEnv } from './env.schema';
 const valid = {
   DATABASE_URL: 'postgresql://docent:docent@localhost:5432/docent',
   REDIS_URL: 'redis://localhost:6379',
+  OPENAI_API_KEY: 'sk-test-key',
 };
 
 describe('validateEnv', () => {
@@ -51,5 +52,26 @@ describe('validateEnv', () => {
     expect(() =>
       validateEnv({ ...valid, REDIS_URL: 'http://localhost:6379' }),
     ).toThrow(/REDIS_URL/);
+  });
+
+  it('rejects a missing OPENAI_API_KEY by name', () => {
+    const withoutKey = Object.fromEntries(
+      Object.entries(valid).filter(([key]) => key !== 'OPENAI_API_KEY'),
+    );
+
+    expect(() => validateEnv(withoutKey)).toThrow(/OPENAI_API_KEY/);
+  });
+
+  it('defaults the embedding model and dimensionality', () => {
+    const env = validateEnv({ ...valid });
+
+    expect(env.EMBEDDING_MODEL).toBe('text-embedding-3-large');
+    expect(env.EMBEDDING_DIMENSIONS).toBe(3072);
+  });
+
+  it('refuses a dimensionality the chunks table cannot store', () => {
+    expect(() =>
+      validateEnv({ ...valid, EMBEDDING_DIMENSIONS: '1536' }),
+    ).toThrow(/EMBEDDING_DIMENSIONS/);
   });
 });
