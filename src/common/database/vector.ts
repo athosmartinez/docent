@@ -30,6 +30,12 @@ export function parseVectorLiteral(literal: string): number[] {
   }
 
   return body.split(',').map((part) => {
+    // Number('') and Number('  ') both coerce to 0, which is finite — an empty
+    // segment would otherwise slip past the isFinite guard below as a silent 0.
+    if (part.trim().length === 0) {
+      throw new Error(`malformed vector literal: ${literal}`);
+    }
+
     const value = Number(part);
 
     if (!Number.isFinite(value)) {

@@ -24,4 +24,24 @@ describe('parseVectorLiteral', () => {
   it('rejects a malformed literal instead of returning garbage', () => {
     expect(() => parseVectorLiteral('0.1,0.2')).toThrow(/malformed/i);
   });
+
+  it('keeps parsing when whitespace surrounds a real number', () => {
+    expect(parseVectorLiteral('[0.1, -0.2]')).toEqual([0.1, -0.2]);
+  });
+
+  it('rejects a trailing empty segment instead of silently inserting a 0', () => {
+    expect(() => parseVectorLiteral('[1,2,]')).toThrow(/malformed/i);
+  });
+
+  it('rejects a leading empty segment instead of silently inserting a 0', () => {
+    expect(() => parseVectorLiteral('[,1]')).toThrow(/malformed/i);
+  });
+
+  it('rejects an empty segment in the middle instead of silently inserting a 0', () => {
+    expect(() => parseVectorLiteral('[1,,2]')).toThrow(/malformed/i);
+  });
+
+  it('rejects a whitespace-only segment instead of silently inserting a 0', () => {
+    expect(() => parseVectorLiteral('[1, ,2]')).toThrow(/malformed/i);
+  });
 });
