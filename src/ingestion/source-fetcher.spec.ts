@@ -1,3 +1,5 @@
+import { readdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
 import { fetchSource } from './source-fetcher';
@@ -30,5 +32,29 @@ describe('fetchSource', () => {
     await expect(fetchSource('/nonexistent/directory/xyz')).rejects.toThrow(
       /not a directory|no such/i,
     );
+  });
+
+  it('names the url and carries the cause when a clone fails, and cleans up its temp directory', async () => {
+    const leakedIngestDirs = async (): Promise<string[]> =>
+      (await readdir(tmpdir())).filter((entry) =>
+        entry.startsWith('docent-ingest-'),
+      );
+
+    const before = await leakedIngestDirs();
+
+    let thrown: unknown;
+    try {
+      // A domain that cannot resolve fails fast without needing a real
+      // remote or any fixture — the DNS lookup itself is the rejection.
+      await fetchSource('https://invalid.invalid/nope.git');
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toMatch(/invalid\.invalid/);
+    expect((thrown as Error).message).toMatch(/resolve host/i);
+
+    await expect(leakedIngestDirs()).resolves.toEqual(before);
   });
 });
