@@ -6,9 +6,11 @@ Guidance for AI agents (and humans) working in this repository.
 
 `docent` is an **agentic RAG service** over docs/codebases, in **TypeScript / Nest.js**, with multi-provider LLM routing + fallback, cost tracking, an evaluation suite, and a native **MCP** server. See `README.md` for the public overview.
 
-## Current status — greenfield
+## Current status — M0 complete
 
-**No application code exists yet.** The repo currently has only README, LICENSE, gitignore, and the planning folder. Work starts at **milestone M0** (bootstrap).
+The service boots, connects to PostgreSQL and Redis, and reports readiness at
+`GET /health`. There is no ingestion or retrieval yet. **Next milestone: M1**
+(ingestion pipeline) — see `_planning/03-roadmap.md`.
 
 ## The plan lives in `_planning/` (read it first)
 
@@ -30,7 +32,18 @@ Do **not** commit anything under `_planning/` (it is gitignored on purpose).
 
 ## Commands
 
-> To be filled in as M0 lands (`npm run start:dev`, `docker compose up`, `npm test`, `npm run eval`). Keep this section current.
+```bash
+docker compose up -d      # PostgreSQL + pgvector and Redis
+npm run migrate           # apply pending migrations
+npm run migrate:down      # roll the last one back
+npm run start:dev         # API on http://localhost:3000
+npm run lint              # ESLint
+npm test                  # unit tests
+npm run test:e2e          # end-to-end tests (needs compose running)
+npm run build             # compile to dist/
+```
+
+`GET /health` returns 200 when PostgreSQL and Redis both answer, and 503 otherwise.
 
 ## Conventions
 
