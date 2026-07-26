@@ -36,4 +36,20 @@ describe('validateEnv', () => {
       /NODE_ENV/,
     );
   });
+
+  it('rejects a PORT above the valid range', () => {
+    expect(() => validateEnv({ ...valid, PORT: '99999' })).toThrow(/PORT/);
+  });
+
+  it('rejects a DATABASE_URL with the wrong protocol', () => {
+    expect(() =>
+      validateEnv({ ...valid, DATABASE_URL: 'https://example.com' }),
+    ).toThrow(/DATABASE_URL/);
+  });
+
+  it('rejects a REDIS_URL with the wrong protocol', () => {
+    expect(() =>
+      validateEnv({ ...valid, REDIS_URL: 'http://localhost:6379' }),
+    ).toThrow(/REDIS_URL/);
+  });
 });
