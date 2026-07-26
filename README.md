@@ -85,20 +85,42 @@ flowchart TB
 
 ## Getting started
 
-> 🚧 Target setup (work in progress — commands will land as milestones ship).
-
 ```bash
 git clone https://github.com/athosmartinez/docent.git
 cd docent
 
-cp .env.example .env          # add your provider API keys
+cp .env.example .env          # database and redis connection strings
 docker compose up -d          # PostgreSQL + pgvector + Redis
 
 npm install
+npm run migrate
 npm run start:dev             # API on http://localhost:3000
 ```
 
-Ingest a source and ask a question:
+Verify it came up:
+
+```bash
+curl localhost:3000/health
+```
+
+Terminus reports `status`, `info`, `error` and `details` — `error` and `details` are present (as `{}` / mirrored `info`) even when everything is healthy:
+
+```json
+{
+  "status": "ok",
+  "info": {
+    "database": { "status": "up" },
+    "redis": { "status": "up" }
+  },
+  "error": {},
+  "details": {
+    "database": { "status": "up" },
+    "redis": { "status": "up" }
+  }
+}
+```
+
+> 🚧 Planned — ingestion (M1) and querying (M2) are not implemented yet.
 
 ```bash
 # ingest a documentation folder or a git repo
@@ -129,7 +151,7 @@ This makes it possible to answer, with numbers, *which* model and retrieval stra
 
 ## Roadmap
 
-- [ ] **M0 — Bootstrap & infra** (Nest scaffold, docker-compose, config, CI skeleton, health check)
+- [x] **M0 — Bootstrap & infra** (Nest scaffold, docker-compose, config, CI skeleton, health check)
 - [ ] **M1 — Ingestion pipeline** (loaders, code-aware chunking, embeddings, pgvector store)
 - [ ] **M2 — Core RAG** (retriever, grounded answers with citations, streaming, minimal UI)
 - [ ] **M3 — Production engine** (multi-provider router + fallback, cost/token ledger, caching)
