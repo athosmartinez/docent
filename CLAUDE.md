@@ -6,11 +6,12 @@ Guidance for AI agents (and humans) working in this repository.
 
 `docent` is an **agentic RAG service** over docs/codebases, in **TypeScript / Nest.js**, with multi-provider LLM routing + fallback, cost tracking, an evaluation suite, and a native **MCP** server. See `README.md` for the public overview.
 
-## Current status — M0 complete
+## Current status — M1 complete
 
-The service boots, connects to PostgreSQL and Redis, and reports readiness at
-`GET /health`. There is no ingestion or retrieval yet. **Next milestone: M1**
-(ingestion pipeline) — see `_planning/03-roadmap.md`.
+The service ingests a documentation repository into embedded, indexed chunks:
+`POST /ingest` and `npm run ingest` both drive the same pipeline. There is no
+retrieval or answering yet — the `content_tsv` column and the vector index exist but
+nothing queries them. **Next milestone: M2** (core RAG) — see `_planning/03-roadmap.md`.
 
 ## The plan lives in `_planning/` (read it first)
 
@@ -61,6 +62,7 @@ npm run format            # Prettier
 npm test                  # unit tests
 npm run test:e2e          # end-to-end tests (needs compose running)
 npm run build             # compile to dist/
+npm run ingest -- <source> [--include <glob>]   # ingest a docs repo or local path
 ```
 
 `npm run lint` is a hard gate: no `--fix`, and `--max-warnings 0`, so a warning fails
@@ -107,6 +109,14 @@ anything that talks to the network or to the database.
 - **Configuration is validated at boot** by zod in `src/common/config/env.schema.ts`.
   Anything new the code reads from the environment goes in that schema, with a
   constraint tight enough to fail at startup rather than at first use.
+- **Embedding results are matched by the API's `index` field, never by array
+  position.** The response order is not guaranteed, and pairing by position would
+  silently attach one chunk's vector to another.
+- **The chunk embedding dimensionality lives in exactly two places:** the migration's
+  `vector(3072)` and `CHUNK_EMBEDDING_DIMENSIONS` in
+  `src/common/database/schema.ts`, which configuration is validated against at boot.
+  The HNSW index casts to `halfvec` because pgvector caps a `vector` index at 2000
+  dimensions.
 
 ## Security
 

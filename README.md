@@ -2,7 +2,7 @@
 
 # 🧭 docent
 
-**Agentic RAG over your docs and code — grounded answers with citations, multi-provider fallback, cost tracking, and native MCP support.**
+**Agentic RAG over your documentation — grounded answers with citations, multi-provider fallback, cost tracking, and native MCP support.**
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
@@ -16,7 +16,7 @@
 
 ## What is docent?
 
-A **docent** is the expert guide who walks you through a collection and answers your questions about it. This project does the same for **technical documentation and codebases**: point it at a set of docs or a repository, and it becomes an AI assistant you can query through a **REST API**, a **web UI**, or **directly inside Claude / Cursor** via the **Model Context Protocol (MCP)**.
+A **docent** is the expert guide who walks you through a collection and answers your questions about it. This project does the same for **technical documentation**: point it at a set of docs — a folder or a git repository of markdown — and it becomes an AI assistant you can query through a **REST API**, a **web UI**, or **directly inside Claude / Cursor** via the **Model Context Protocol (MCP)**. Ingesting **source code** the same way — chunked by AST rather than treated as prose — is planned for **M6.5**.
 
 Unlike a typical demo chatbot, `docent` is built like a real backend service, in **TypeScript / Nest.js**, with the engineering concerns that matter in production:
 
@@ -47,7 +47,7 @@ Unlike a typical demo chatbot, `docent` is built like a real backend service, in
 ```mermaid
 flowchart TB
   subgraph Ingestion["📥 Ingestion pipeline"]
-    SRC["Docs / Codebase"] --> CHUNK["Loader & Chunker"]
+    SRC["Docs · Code (planned)"] --> CHUNK["Loader & Chunker"]
     CHUNK --> EMB["Embeddings"]
     EMB --> VEC[("PostgreSQL + pgvector")]
   end
@@ -76,7 +76,7 @@ flowchart TB
 
 - **Runtime / framework:** Node.js 24 LTS · TypeScript (strict) · Nest.js
 - **Storage / vectors:** PostgreSQL + pgvector · Redis (cache)
-- **LLM access:** OpenAI-compatible SDKs · OpenRouter
+- **LLM access:** OpenAI embeddings (`text-embedding-3-large`) · OpenAI-compatible SDKs · OpenRouter *(routing planned)*
 - **Agent tooling / MCP:** `@modelcontextprotocol/sdk`
 - **Evaluation:** promptfoo + LLM-as-judge
 - **Infra:** Docker · docker-compose · GitHub Actions (CI)
@@ -124,13 +124,31 @@ Terminus reports `status`, `info`, `error` and `details` — `error` and `detail
 }
 ```
 
-> 🚧 Planned — ingestion (M1) and querying (M2) are not implemented yet.
+Ingest a documentation source:
 
 ```bash
-# ingest a documentation folder or a git repo
-curl -X POST localhost:3000/ingest -d '{ "source": "https://github.com/some/library" }'
+npm run ingest -- https://github.com/nestjs/docs.nestjs.com --include 'content/**/*.md'
+```
 
-# ask, and get an answer with citations
+or over HTTP, which returns immediately and processes in the background:
+
+```bash
+curl -X POST localhost:3000/ingest \
+  -H 'content-type: application/json' \
+  -d '{ "source": "https://github.com/nestjs/docs.nestjs.com", "include": "content/**/*.md" }'
+# { "sourceId": "...", "status": "pending" }
+
+curl localhost:3000/sources/<sourceId>
+# { "status": "ready", "document_count": 136, "chunk_count": 842, ... }
+```
+
+> **Known limitation:** ingestion runs in-process. If the service is interrupted
+> mid-run, the source is protected by a lease that expires after 15 minutes — after
+> that, a new run may reclaim it. A durable queue arrives with M3.
+
+> 🚧 Planned — querying (M2) is not implemented yet.
+
+```bash
 curl -X POST localhost:3000/ask -d '{ "question": "How do I configure retries?" }'
 ```
 
@@ -156,12 +174,13 @@ This makes it possible to answer, with numbers, *which* model and retrieval stra
 ## Roadmap
 
 - [x] **M0 — Bootstrap & infra** (Nest scaffold, docker-compose, config, CI skeleton, health check)
-- [ ] **M1 — Ingestion pipeline** (loaders, code-aware chunking, embeddings, pgvector store)
+- [x] **M1 — Ingestion pipeline** (loaders, code-aware chunking, embeddings, pgvector store)
 - [ ] **M2 — Core RAG** (retriever, grounded answers with citations, streaming, minimal UI)
 - [ ] **M3 — Production engine** (multi-provider router + fallback, cost/token ledger, caching)
 - [ ] **M4 — Agentic layer** (tool calling, multi-step planning, anti-hallucination guardrails)
 - [ ] **M5 — MCP server** (stdio + HTTP, tools exposed, Claude/Cursor integration)
 - [ ] **M6 — Evaluation suite** (dataset, metrics, LLM-as-judge, model comparison table)
+- [ ] **M6.5 — Source code ingestion** (chunking by AST, search over literal identifiers)
 - [ ] **M7 — Polish & launch** (tests, CI, Docker, demo deploy, docs)
 
 ---
