@@ -5,6 +5,7 @@ import {
   Delete,
   Get,
   HttpCode,
+  Inject,
   NotFoundException,
   Param,
   ParseUUIDPipe,
@@ -17,8 +18,11 @@ import { IngestionService } from './ingestion.service';
 
 @Controller()
 export class IngestionController {
+  // See IngestionService's constructor for why these are explicitly
+  // @Inject()-ed instead of left to implicit type-based resolution.
   constructor(
-    private readonly service: IngestionService,
+    @Inject(IngestionService) private readonly service: IngestionService,
+    @Inject(IngestionRepository)
     private readonly repository: IngestionRepository,
   ) {}
 

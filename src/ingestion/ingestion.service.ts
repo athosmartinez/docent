@@ -65,7 +65,14 @@ export const DEFAULT_INGESTION_LEASE_CONFIG: IngestionLeaseConfig = {
 export class IngestionService {
   private readonly logger = new Logger(IngestionService.name);
 
+  // Every parameter here is explicitly @Inject()-ed rather than left for Nest
+  // to resolve from TypeScript's emitted `design:paramtypes`: esbuild-based
+  // runners (tsx, which the ingestion CLI boots this app through) never emit
+  // that metadata, so an implicit class-typed parameter silently resolves to
+  // `undefined` outside of a real tsc build — ts-jest and `nest build` never
+  // showed this because both go through the TypeScript compiler.
   constructor(
+    @Inject(IngestionRepository)
     private readonly repository: IngestionRepository,
     @Inject(EMBEDDINGS) private readonly embeddings: EmbeddingsProvider,
     @Inject(INGESTION_LEASE_CONFIG)
@@ -81,18 +88,47 @@ export class IngestionService {
     uri: string,
     include: string,
   ): Promise<{ sourceId: string; status: string }> {
+    const sourceId = await this.claimSource(uri);
+
+    this.launch(sourceId, uri, include);
+
+    return { sourceId, status: 'pending' };
+  }
+
+  /**
+   * Claims the source and runs the pipeline inline, resolving only once
+   * ingestion has actually finished. For a caller — the ingestion CLI —
+   * that should exit when the work is done rather than have it scheduled
+   * in the background. Shares `startIngestion`'s atomic claim, so a CLI
+   * run and a concurrent HTTP request for the same source can't both
+   * become writers: whichever loses the claim gets the same
+   * `ConflictException` either path would produce.
+   */
+  async ingestInline(uri: string, include: string): Promise<string> {
+    const sourceId = await this.claimSource(uri);
+
+    await this.runPipeline(sourceId, uri, include);
+
+    return sourceId;
+  }
+
+  /**
+   * Resolves a URI to a claimed source row, ready for a pipeline run:
+   * reuses an existing row (atomically claiming it — see `reuse` — so a
+   * source already being processed cannot be claimed twice), or creates a
+   * fresh one. The insert race for a brand-new URI is handled by
+   * `sources.uri`'s unique constraint rather than a claim, since there is
+   * no prior row either caller could have already claimed.
+   */
+  private async claimSource(uri: string): Promise<string> {
     const existing = await this.repository.findSourceByUri(uri);
 
     if (existing) {
-      return this.reuse(existing, uri, include);
+      return this.reuse(existing, uri);
     }
 
     try {
-      const sourceId = await this.repository.createSource(uri, 'docs');
-
-      this.launch(sourceId, uri, include);
-
-      return { sourceId, status: 'pending' };
+      return await this.repository.createSource(uri, 'docs');
     } catch (error) {
       if (!isUniqueViolation(error)) {
         throw error;
@@ -107,25 +143,21 @@ export class IngestionService {
         throw error;
       }
 
-      return this.reuse(winner, uri, include);
+      return this.reuse(winner, uri);
     }
   }
 
   /**
-   * Starts (or restarts) a pipeline against an already-known row. Two
-   * concurrent requests for the same URI both resolve here — reusing the
-   * same row on their own path, or via the other's unique-violation
-   * fallback above — so this is the one place that has to refuse a
-   * duplicate run, and it does so with a single atomic claim rather than a
-   * check followed by a separate write: two callers racing this method for
-   * the same source cannot both win, because the claim's WHERE clause is
-   * re-evaluated against whichever one committed first.
+   * Claims an already-known row for a new run. Two concurrent callers for
+   * the same URI both resolve here — reusing the same row on their own
+   * path, or via the other's unique-violation fallback above — so this is
+   * the one place that has to refuse a duplicate run, and it does so with
+   * a single atomic claim rather than a check followed by a separate
+   * write: two callers racing this method for the same source cannot both
+   * win, because the claim's WHERE clause is re-evaluated against
+   * whichever one committed first.
    */
-  private async reuse(
-    source: SourceRow,
-    uri: string,
-    include: string,
-  ): Promise<{ sourceId: string; status: string }> {
+  private async reuse(source: SourceRow, uri: string): Promise<string> {
     const staleBefore = new Date(Date.now() - this.lease.leaseMs);
 
     // Computed from the pre-claim snapshot, purely to decide whether to log
@@ -155,9 +187,7 @@ export class IngestionService {
     // (work is in progress), never "done with nothing in it".
     await this.repository.deleteSourceContent(claimed.id);
 
-    this.launch(claimed.id, uri, include);
-
-    return { sourceId: claimed.id, status: 'pending' };
+    return claimed.id;
   }
 
   private launch(sourceId: string, uri: string, include: string): void {

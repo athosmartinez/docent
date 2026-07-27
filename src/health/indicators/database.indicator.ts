@@ -14,8 +14,12 @@ const PROBE_TIMEOUT_MS = 3_000;
 
 @Injectable()
 export class DatabaseHealthIndicator {
+  // See IngestionService's constructor for why the second parameter is
+  // explicitly @Inject()-ed instead of left to implicit type-based
+  // resolution.
   constructor(
     @Inject(KYSELY) private readonly db: Kysely<DB>,
+    @Inject(HealthIndicatorService)
     private readonly healthIndicatorService: HealthIndicatorService,
   ) {}
 

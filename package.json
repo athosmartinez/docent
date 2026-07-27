@@ -19,6 +19,7 @@
     "lint:fix": "eslint \"{src,apps,libs,test,scripts,migrations}/**/*.ts\" --fix",
     "migrate": "node --env-file-if-exists=.env --import tsx scripts/migrate.ts",
     "migrate:down": "node --env-file-if-exists=.env --import tsx scripts/migrate.ts down",
+    "ingest": "node --env-file-if-exists=.env --import tsx scripts/ingest.ts",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
