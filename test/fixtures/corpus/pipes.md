@@ -7,3 +7,13 @@ A pipe is a class annotated with the `@Injectable()` decorator, which implements
 #### Built-in pipes
 
 Nest comes with several pipes available out-of-the-box, including `ValidationPipe` and `ParseIntPipe`.
+
+```typescript
+@@filename()
+@Injectable()
+export class ParseIntPipe implements PipeTransform<string, number> {
+  transform(value: string): number {
+    return parseInt(value, 10);
+  }
+}
+```

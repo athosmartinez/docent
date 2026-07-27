@@ -13,6 +13,9 @@ import {
   EMBEDDINGS,
   type EmbeddingsProvider,
 } from '../src/embeddings/embeddings.types';
+import { IngestionRepository } from '../src/ingestion/ingestion.repository';
+import { IngestionService } from '../src/ingestion/ingestion.service';
+import { waitForStatus } from './support/wait-for-source';
 
 const FIXTURES = path.resolve(__dirname, 'fixtures/corpus');
 
@@ -31,26 +34,6 @@ const stubEmbeddings: EmbeddingsProvider = {
       ),
     ),
 };
-
-async function waitForStatus(
-  server: Server,
-  id: string,
-  target: string,
-  attempts = 40,
-): Promise<Record<string, unknown>> {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const response = await request(server).get(`/sources/${id}`);
-    const body = response.body as Record<string, unknown>;
-
-    if (body.status === target || body.status === 'failed') {
-      return body;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-
-  throw new Error(`source ${id} never reached ${target}`);
-}
 
 describe('ingestion', () => {
   let app: INestApplication<Server>;
@@ -97,7 +80,8 @@ describe('ingestion', () => {
       .expect(202);
 
     const { sourceId } = accepted.body as { sourceId: string };
-    await waitForStatus(app.getHttpServer(), sourceId, 'ready');
+    const source = await waitForStatus(app.getHttpServer(), sourceId, 'ready');
+    expect(source.status).toBe('ready');
 
     const rows = await db
       .selectFrom('chunks')
@@ -114,6 +98,34 @@ describe('ingestion', () => {
     }
   });
 
+  it('omits metadata entirely when every filename directive in a document is bare', async () => {
+    const accepted = await request(app.getHttpServer())
+      .post('/ingest')
+      .send({ source: FIXTURES })
+      .expect(202);
+
+    const { sourceId } = accepted.body as { sourceId: string };
+    const source = await waitForStatus(app.getHttpServer(), sourceId, 'ready');
+    expect(source.status).toBe('ready');
+
+    // pipes.md's only `@@filename()` directive is bare (Nest's "no
+    // dedicated file" marker), so the filtered, per-document filename list
+    // is empty and every one of its chunks should carry no metadata at all
+    // — not `{ filenames: [''] }`.
+    const rows = await db
+      .selectFrom('chunks')
+      .innerJoin('documents', 'documents.id', 'chunks.document_id')
+      .select('chunks.metadata')
+      .where('documents.source_id', '=', sourceId)
+      .where('documents.path', '=', 'pipes.md')
+      .execute();
+
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.metadata).toEqual({});
+    }
+  });
+
   it('replaces previous content instead of duplicating on re-ingestion', async () => {
     const first = await request(app.getHttpServer())
       .post('/ingest')
@@ -125,6 +137,8 @@ describe('ingestion', () => {
       firstId,
       'ready',
     );
+    expect(afterFirst.status).toBe('ready');
+    expect(Number(afterFirst.chunk_count)).toBeGreaterThan(0);
 
     const second = await request(app.getHttpServer())
       .post('/ingest')
@@ -136,9 +150,94 @@ describe('ingestion', () => {
       secondId,
       'ready',
     );
-
+    expect(afterSecond.status).toBe('ready');
     expect(secondId).toBe(firstId);
-    expect(afterSecond.chunk_count).toBe(afterFirst.chunk_count);
+
+    // The denormalised counter alone would still pass this test even if a
+    // repository bug reset it without deleting the underlying rows; count
+    // the actual chunk rows through their document instead.
+    const { count } = await db
+      .selectFrom('chunks')
+      .innerJoin('documents', 'documents.id', 'chunks.document_id')
+      .select((eb) => eb.fn.countAll().as('count'))
+      .where('documents.source_id', '=', secondId)
+      .executeTakeFirstOrThrow();
+
+    expect(Number(count)).toBeGreaterThan(0);
+    expect(Number(count)).toBe(Number(afterFirst.chunk_count));
+  });
+
+  it('never pairs a ready status with zeroed counts while resetting a source for re-ingestion', async () => {
+    const repository = app.get(IngestionRepository);
+    const embedding = Array.from(
+      { length: CHUNK_EMBEDDING_DIMENSIONS },
+      () => 0.1,
+    );
+
+    const id = await repository.createSource(FIXTURES, 'docs');
+    await repository.insertDocumentWithChunks(
+      id,
+      { path: 'a.md', title: 'A' },
+      [
+        {
+          ordinal: 0,
+          content: 'one',
+          headingPath: ['A'],
+          tokenCount: 1,
+          embedding,
+          metadata: {},
+        },
+      ],
+    );
+    await repository.markReady(id);
+
+    const ready = await repository.findSource(id);
+    expect(ready?.status).toBe('ready');
+    expect(Number(ready?.chunk_count)).toBeGreaterThan(0);
+
+    // This is the exact order IngestionService's reuse path uses: status
+    // leaves its terminal value before the counts are cleared, so no reader
+    // — polling over HTTP or querying the table directly — can ever observe
+    // a 'ready' row whose content has already been wiped.
+    await repository.markProcessing(id, null);
+    const afterMarkProcessing = await repository.findSource(id);
+    expect(afterMarkProcessing?.status).not.toBe('ready');
+
+    await repository.deleteSourceContent(id);
+    const afterDelete = await repository.findSource(id);
+    expect(afterDelete?.status).not.toBe('ready');
+    expect(afterDelete?.chunk_count).toBe(0);
+  });
+
+  it('fails the whole source when a document collides at the database, instead of counting it as skipped', async () => {
+    const repository = app.get(IngestionRepository);
+    const service = app.get(IngestionService);
+
+    const id = await repository.createSource(FIXTURES, 'docs');
+
+    // Pre-seed a row that collides with one of the fixture files on the
+    // (source_id, path) constraint, so inserting it raises a genuine
+    // database error rather than a markdown-parsing one. 'guards.md' sorts
+    // first among the fixtures, so this is also the first document
+    // runPipeline reaches.
+    await db
+      .insertInto('documents')
+      .values({ source_id: id, path: 'guards.md', title: 'pre-existing' })
+      .execute();
+
+    let caught: unknown;
+    try {
+      await service.runPipeline(id, FIXTURES, '**/*.md');
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeDefined();
+
+    const source = await repository.findSource(id);
+    expect(source?.status).toBe('failed');
+    expect(source?.error).toBeTruthy();
+    expect(source?.chunk_count).toBe(0);
   });
 
   it('records a failed source for an unusable path', async () => {
