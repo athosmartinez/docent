@@ -29,6 +29,19 @@ function isUniqueViolation(error: unknown): boolean {
 /** A source in either state already has a pipeline running against it. */
 const RUNNING_STATUSES = new Set(['pending', 'processing']);
 
+/**
+ * How long a `pending`/`processing` row can go without its lease —
+ * `updated_at` — being renewed before it's presumed dead rather than
+ * genuinely in flight. `insertDocumentWithChunks` renews it on every
+ * document, and `runPipeline`'s own `markProcessing` call renews it at the
+ * start of a run, so a live run's gap between renewals is normally seconds.
+ * This is measured against the slowest single document in the real corpus
+ * (a large file, a rate-limited or retried embedding batch), not against the
+ * whole run — minutes of margin, so a crash, a `Ctrl-C`, or a dropped
+ * connection is what goes stale here, not a slow document.
+ */
+const PROCESSING_LEASE_MS = 15 * 60 * 1000;
+
 @Injectable()
 export class IngestionService {
   private readonly logger = new Logger(IngestionService.name);
@@ -82,28 +95,48 @@ export class IngestionService {
    * concurrent requests for the same URI both resolve here — reusing the
    * same row on their own path, or via the other's unique-violation
    * fallback above — so this is the one place that has to refuse a
-   * duplicate run.
+   * duplicate run, and it does so with a single atomic claim rather than a
+   * check followed by a separate write: two callers racing this method for
+   * the same source cannot both win, because the claim's WHERE clause is
+   * re-evaluated against whichever one committed first.
    */
   private async reuse(
     source: SourceRow,
     uri: string,
     include: string,
   ): Promise<{ sourceId: string; status: string }> {
-    if (RUNNING_STATUSES.has(source.status)) {
+    const staleBefore = new Date(Date.now() - PROCESSING_LEASE_MS);
+
+    // Computed from the pre-claim snapshot, purely to decide whether to log
+    // below — the claim itself is what actually enforces the rule.
+    const reclaimingStaleRun =
+      RUNNING_STATUSES.has(source.status) && source.updated_at < staleBefore;
+
+    const claimed = await this.repository.claimForProcessing(
+      source.id,
+      staleBefore,
+    );
+
+    if (!claimed) {
       throw new ConflictException(`ingestion already in progress for ${uri}`);
     }
 
-    // Order matters: flipping status off its previous terminal value before
-    // the counts are cleared means no reader can observe a 'ready' (or
-    // 'failed') status paired with zeroed counts — the interim state is
-    // 'processing' with stale-but-nonzero counts, which is honest (work is
-    // in progress), never "done with nothing in it".
-    await this.repository.markProcessing(source.id, null);
-    await this.repository.deleteSourceContent(source.id);
+    if (reclaimingStaleRun) {
+      this.logger.warn(
+        `reclaiming a stale ${source.status} run for ${uri} (last updated ${source.updated_at.toISOString()})`,
+      );
+    }
 
-    this.launch(source.id, uri, include);
+    // Order matters: the claim above flips status off its previous terminal
+    // value before the counts are cleared here, so no reader can observe a
+    // 'ready' (or 'failed') status paired with zeroed counts — the interim
+    // state is 'processing' with stale-but-nonzero counts, which is honest
+    // (work is in progress), never "done with nothing in it".
+    await this.repository.deleteSourceContent(claimed.id);
 
-    return { sourceId: source.id, status: 'pending' };
+    this.launch(claimed.id, uri, include);
+
+    return { sourceId: claimed.id, status: 'pending' };
   }
 
   private launch(sourceId: string, uri: string, include: string): void {

@@ -195,13 +195,16 @@ describe('ingestion', () => {
     expect(ready?.status).toBe('ready');
     expect(Number(ready?.chunk_count)).toBeGreaterThan(0);
 
-    // This is the exact order IngestionService's reuse path uses: status
-    // leaves its terminal value before the counts are cleared, so no reader
-    // — polling over HTTP or querying the table directly — can ever observe
-    // a 'ready' row whose content has already been wiped.
-    await repository.markProcessing(id, null);
-    const afterMarkProcessing = await repository.findSource(id);
-    expect(afterMarkProcessing?.status).not.toBe('ready');
+    // This is the exact order IngestionService's reuse path uses: the claim
+    // flips status off its terminal value before the counts are cleared, so
+    // no reader — polling over HTTP or querying the table directly — can
+    // ever observe a 'ready' row whose content has already been wiped. (The
+    // claim's own atomicity — that two concurrent callers can't both win —
+    // is exercised over HTTP in ingestion.concurrency.e2e-spec.ts; this test
+    // is scoped to the ordering of the two writes, not the race between two
+    // callers making them.)
+    const claimed = await repository.claimForProcessing(id, new Date());
+    expect(claimed?.status).not.toBe('ready');
 
     await repository.deleteSourceContent(id);
     const afterDelete = await repository.findSource(id);

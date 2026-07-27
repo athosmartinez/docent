@@ -95,6 +95,32 @@ export class IngestionRepository {
       .execute();
   }
 
+  /**
+   * Atomically transitions a source to `processing`, but only if it is
+   * actually claimable: not currently mid-run, or mid-run but stale (its
+   * lease — `updated_at` — has expired). A single conditional `UPDATE`
+   * rather than a read followed by a separate write means two concurrent
+   * callers can't both observe "claimable" and both proceed — Postgres
+   * serializes the two updates against the same row, and the loser's WHERE
+   * clause re-evaluates against the winner's already-committed state and
+   * matches nothing. Returns the updated row on success, `undefined` if
+   * another live run already holds the claim.
+   */
+  async claimForProcessing(
+    id: string,
+    staleBefore: Date,
+  ): Promise<SourceRow | undefined> {
+    const result = await sql<SourceRow>`
+      UPDATE sources
+      SET status = 'processing', commit_sha = NULL, error = NULL, updated_at = now()
+      WHERE id = ${id}::uuid
+        AND (status NOT IN ('pending', 'processing') OR updated_at < ${staleBefore})
+      RETURNING *
+    `.execute(this.db);
+
+    return result.rows[0];
+  }
+
   async markReady(id: string): Promise<void> {
     await this.db
       .updateTable('sources')
