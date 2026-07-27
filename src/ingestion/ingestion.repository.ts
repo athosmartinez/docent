@@ -121,6 +121,23 @@ export class IngestionRepository {
     return result.rows[0];
   }
 
+  /**
+   * Renews a live run's lease independently of document boundaries, so a
+   * single slow document cannot make a genuinely active run look dead to a
+   * competing claim. Guarded on `status = 'processing'` so a heartbeat can
+   * only ever extend the run that is still the one holding the source —
+   * never a run that has already finished (`ready`/`failed`) or been
+   * reclaimed out from under it.
+   */
+  async touchProcessing(id: string): Promise<void> {
+    await this.db
+      .updateTable('sources')
+      .set({ updated_at: new Date() })
+      .where('id', '=', id)
+      .where('status', '=', 'processing')
+      .execute();
+  }
+
   async markReady(id: string): Promise<void> {
     await this.db
       .updateTable('sources')

@@ -29,18 +29,37 @@ function isUniqueViolation(error: unknown): boolean {
 /** A source in either state already has a pipeline running against it. */
 const RUNNING_STATUSES = new Set(['pending', 'processing']);
 
-/**
- * How long a `pending`/`processing` row can go without its lease —
- * `updated_at` — being renewed before it's presumed dead rather than
- * genuinely in flight. `insertDocumentWithChunks` renews it on every
- * document, and `runPipeline`'s own `markProcessing` call renews it at the
- * start of a run, so a live run's gap between renewals is normally seconds.
- * This is measured against the slowest single document in the real corpus
- * (a large file, a rate-limited or retried embedding batch), not against the
- * whole run — minutes of margin, so a crash, a `Ctrl-C`, or a dropped
- * connection is what goes stale here, not a slow document.
- */
-const PROCESSING_LEASE_MS = 15 * 60 * 1000;
+/** Injection token for {@link IngestionLeaseConfig}. */
+export const INGESTION_LEASE_CONFIG = Symbol('INGESTION_LEASE_CONFIG');
+
+export interface IngestionLeaseConfig {
+  /**
+   * How long a `pending`/`processing` row can go without its lease —
+   * `updated_at` — being renewed before it's presumed dead rather than
+   * genuinely in flight. A live run renews it well inside this window (see
+   * `heartbeatIntervalMs`), so what actually goes stale here is a crash, a
+   * `Ctrl-C`, or a dropped connection — never a run that is still making
+   * progress, however slowly.
+   */
+  leaseMs: number;
+  /**
+   * How often a live run renews its own lease while work is in progress,
+   * independent of document boundaries. Must stay comfortably shorter than
+   * `leaseMs`: a single document slower than the gap between two heartbeats
+   * (a large file, a rate-limited or retried embedding call) must never be
+   * mistaken for a dead run. `insertDocumentWithChunks` and the initial
+   * `markProcessing` call also renew the lease, as a bonus, but a document
+   * can run long enough that neither fires for the whole duration — this
+   * interval is what covers that gap.
+   */
+  heartbeatIntervalMs: number;
+}
+
+/** Production defaults: overridden with shorter values only in tests. */
+export const DEFAULT_INGESTION_LEASE_CONFIG: IngestionLeaseConfig = {
+  leaseMs: 15 * 60 * 1000,
+  heartbeatIntervalMs: 2 * 60 * 1000,
+};
 
 @Injectable()
 export class IngestionService {
@@ -49,6 +68,8 @@ export class IngestionService {
   constructor(
     private readonly repository: IngestionRepository,
     @Inject(EMBEDDINGS) private readonly embeddings: EmbeddingsProvider,
+    @Inject(INGESTION_LEASE_CONFIG)
+    private readonly lease: IngestionLeaseConfig = DEFAULT_INGESTION_LEASE_CONFIG,
   ) {}
 
   /**
@@ -105,7 +126,7 @@ export class IngestionService {
     uri: string,
     include: string,
   ): Promise<{ sourceId: string; status: string }> {
-    const staleBefore = new Date(Date.now() - PROCESSING_LEASE_MS);
+    const staleBefore = new Date(Date.now() - this.lease.leaseMs);
 
     // Computed from the pre-claim snapshot, purely to decide whether to log
     // below — the claim itself is what actually enforces the rule.
@@ -151,12 +172,32 @@ export class IngestionService {
     include: string,
   ): Promise<void> {
     let cleanup: (() => Promise<void>) | null = null;
+    let heartbeat: NodeJS.Timeout | null = null;
 
     try {
       const fetched = await fetchSource(uri);
       cleanup = fetched.cleanup;
 
       await this.repository.markProcessing(sourceId, fetched.commitSha);
+
+      // Renews the lease independently of document boundaries, so a single
+      // document slower than the whole lease window (a large file, a
+      // rate-limited or retried embedding call) is never mistaken for a
+      // dead run by a competing claim. unref() so this timer alone cannot
+      // keep the process alive, and it is cleared in `finally` below
+      // regardless of how this run ends.
+      heartbeat = setInterval(() => {
+        void this.repository
+          .touchProcessing(sourceId)
+          .catch((error: unknown) => {
+            // A missed heartbeat degrades the lease; it must never abort a
+            // run that is otherwise still making progress.
+            this.logger.warn(
+              `heartbeat failed for ${uri}: ${describeError(error)}`,
+            );
+          });
+      }, this.lease.heartbeatIntervalMs);
+      heartbeat.unref();
 
       const documents = await loadMarkdownFiles(fetched.directory, include);
       let skipped = 0;
@@ -219,6 +260,9 @@ export class IngestionService {
       await this.repository.markFailed(sourceId, describeError(error));
       throw error;
     } finally {
+      if (heartbeat) {
+        clearInterval(heartbeat);
+      }
       if (cleanup) {
         await cleanup();
       }
