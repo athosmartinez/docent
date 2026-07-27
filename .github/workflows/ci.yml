@@ -37,6 +37,9 @@ jobs:
       NODE_ENV: test
       DATABASE_URL: postgresql://docent:docent@localhost:5432/docent
       REDIS_URL: redis://localhost:6379
+      # A placeholder, not a secret: config validation requires the variable to be
+      # a non-empty string, and no test in this suite calls the OpenAI API.
+      OPENAI_API_KEY: sk-test-key
 
     steps:
       - uses: actions/checkout@v4
