@@ -2,7 +2,7 @@
 
 # 🧭 docent
 
-**Agentic RAG over your documentation — grounded answers with citations, multi-provider fallback, cost tracking, and native MCP support.**
+**Agentic RAG over your documentation, built as a real backend service — ingestion is live today; grounded answers with citations, multi-provider fallback, cost tracking, and native MCP support are the target design.**
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
@@ -33,12 +33,12 @@ Unlike a typical demo chatbot, `docent` is built like a real backend service, in
 
 | | |
 |---|---|
-| 📚 **Grounded, not guessing** | Every answer cites the exact source chunks it used. If there is no relevant context, it says so instead of hallucinating. |
-| 🤖 **Agentic retrieval** | The model uses tools in multiple steps (search, fetch, plan) instead of a single naive lookup. |
-| 🔀 **Resilient by design** | If a provider fails or times out, requests fall back down a configurable chain. No single point of failure. |
-| 💰 **Cost-aware** | Tokens and USD cost are tracked per request, so you can answer "which model is best for *this* task, and at what price?". |
-| 🧪 **Measurable quality** | A reproducible eval suite scores retrieval hit-rate, faithfulness and relevance — and compares models head to head. |
-| 🔌 **MCP-native** | Runs as an MCP server, usable as a tool inside Claude Desktop / Cursor. |
+| 📚 **Grounded, not guessing** *(in progress)* | Every answer will cite the exact source chunks it used. If there is no relevant context, it will say so instead of hallucinating. The chunk store it depends on is already built (M1); the answering side is not. |
+| 🤖 **Agentic retrieval** *(planned)* | The model will use tools in multiple steps (search, fetch, plan) instead of a single naive lookup. |
+| 🔀 **Resilient by design** *(planned)* | If a provider fails or times out, requests will fall back down a configurable chain. No single point of failure. |
+| 💰 **Cost-aware** *(planned)* | Tokens and USD cost will be tracked per request, so you can answer "which model is best for *this* task, and at what price?". |
+| 🧪 **Measurable quality** *(planned)* | A reproducible eval suite will score retrieval hit-rate, faithfulness and relevance — and compare models head to head. |
+| 🔌 **MCP-native** *(planned)* | Will run as an MCP server, usable as a tool inside Claude Desktop / Cursor. |
 
 ---
 
@@ -52,7 +52,7 @@ flowchart TB
     EMB --> VEC[("PostgreSQL + pgvector")]
   end
 
-  subgraph Query["💬 Query pipeline"]
+  subgraph Query["💬 Query pipeline (planned)"]
     CL["Web UI · REST · MCP"] --> AGENT["Agent Orchestrator"]
     AGENT --> TOOLS["Tools: retriever · web search"]
     TOOLS --> VEC
@@ -68,7 +68,7 @@ flowchart TB
 ```
 
 **Ingestion** turns sources into searchable knowledge: load → chunk (code-aware) → embed → store in `pgvector`.
-**Query** answers a question: the agent plans, retrieves relevant chunks, calls an LLM (with fallback), and returns a grounded answer with citations — while cost and tokens are logged.
+**Query** *(planned)* will answer a question: the agent plans, retrieves relevant chunks, calls an LLM (with fallback), and returns a grounded answer with citations — while cost and tokens are logged.
 
 ---
 
@@ -160,7 +160,9 @@ curl -X POST localhost:3000/ask -d '{ "question": "How do I configure retries?" 
 
 ## Evaluation
 
-The differentiator: `docent` ships with a **reproducible evaluation harness**, not just a demo.
+> 🚧 Planned (M6) — none of this is implemented yet.
+
+The differentiator: `docent` is designed to ship with a **reproducible evaluation harness**, not just a demo.
 
 - A curated **Q&A dataset** over the ingested corpus
 - Automated metrics: **retrieval hit-rate**, **faithfulness** (is the answer grounded in retrieved context?), **answer relevance**, plus **latency and cost**
