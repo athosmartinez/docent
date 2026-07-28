@@ -77,7 +77,7 @@ describe('IngestionRepository', () => {
     expect(row.embedding.startsWith('[')).toBe(true);
   });
 
-  it('populates the generated full-text column so M2 can search it', async () => {
+  it('generates a searchable full-text column from chunk content', async () => {
     const id = await repository.createSource(uri, 'docs');
 
     await repository.insertDocumentWithChunks(
@@ -95,9 +95,9 @@ describe('IngestionRepository', () => {
       ],
     );
 
-    // content_tsv is absent from the DB interface because application code never
-    // writes it, so this asserts through raw SQL — which is also the closest
-    // thing to how M2 will query it.
+    // content_tsv is a PostgreSQL GENERATED column, absent from the DB interface
+    // because application code never writes it, so this asserts through raw SQL —
+    // using the same @@ full-text-match operator a query against it would use.
     const result = await sql<{ matched: string }>`
       SELECT c.id AS matched
       FROM chunks c
