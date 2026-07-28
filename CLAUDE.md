@@ -43,10 +43,12 @@ the flags that will bite you first on the wrong runtime.
 - LLM access via OpenAI-compatible SDKs + OpenRouter · MCP via `@modelcontextprotocol/sdk`
 - Eval via promptfoo + LLM-as-judge
 
-Modules under `src/` today: **`common`** (config, database, redis, shared helpers) and
-**`health`**. The rest — `ingestion · retrieval · agent · llm · cost · mcp · eval · api`
-— are the target structure from `_planning/02-architecture.md`; each is created by the
-milestone that gives it content, not before.
+Modules under `src/` today: **`common`** (config, database, redis, shared helpers),
+**`health`**, **`ingestion`** (source fetching, markdown cleaning, chunking, and the
+repository that writes documents/chunks) and **`embeddings`** (the OpenAI embeddings
+provider). The rest — `retrieval · agent · llm · cost · mcp · eval · api` — are the
+target structure from `_planning/02-architecture.md`; each is created by the milestone
+that gives it content, not before.
 
 ## Commands
 
@@ -117,6 +119,19 @@ anything that talks to the network or to the database.
   `src/common/database/schema.ts`, which configuration is validated against at boot.
   The HNSW index casts to `halfvec` because pgvector caps a `vector` index at 2000
   dimensions.
+- **`documents` and `chunks` rows outlive a source that ends `failed`.** Nothing
+  deletes them: `deleteSourceContent` runs at the *start* of a pipeline (to clear a
+  previous attempt before re-ingesting), never after a failure partway through. A
+  source that fails on document 80 of 136 still leaves the first 79 documents' chunks
+  committed. Anything that reads chunks must filter on `sources.status` (e.g. only
+  `'ready'`), or it will serve rows from a partially-ingested run as though the run had
+  completed.
+- **`chunks.metadata.filenames` is scoped to the document, not the chunk.** It is
+  computed once from every non-empty `@@filename(...)` directive found anywhere in the
+  source markdown, then copied onto every chunk produced from that document —
+  including chunks whose own text contains none of those files. It says which files
+  the document as a whole mentions, not which file a given chunk's example belongs to;
+  code that reads it needs to treat it that way.
 
 ## Security
 
