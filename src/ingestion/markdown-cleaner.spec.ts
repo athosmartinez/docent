@@ -160,4 +160,60 @@ describe('cleanMarkdown', () => {
     expect(content).toContain('<table>');
     expect(content).toContain('no closing tag');
   });
+
+  it('preserves an Angular component example encoded inside a table cell code span', () => {
+    const raw =
+      '<table><tr><td><code>&lt;app-foo&gt;&lt;/app-foo&gt;</code></td><td>desc</td></tr></table>';
+
+    const { content } = cleanMarkdown(raw);
+
+    expect(content).toContain('`<app-foo></app-foo>` — desc');
+  });
+
+  it('preserves a figure block encoded inside a table cell code span', () => {
+    const raw =
+      '<table><tr><td><code>&lt;figure&gt;&lt;/figure&gt;</code></td><td>desc</td></tr></table>';
+
+    const { content } = cleanMarkdown(raw);
+
+    expect(content).toContain('`<figure></figure>` — desc');
+  });
+
+  it('preserves an Angular component example written as an inline code span in prose', () => {
+    const raw =
+      'Use `<app-banner-courses></app-banner-courses>` to embed the banner.';
+
+    const { content } = cleanMarkdown(raw);
+
+    expect(content).toContain('`<app-banner-courses></app-banner-courses>`');
+  });
+
+  it('still removes a real Angular component that appears outside any code span', () => {
+    const raw = [
+      '### Guards',
+      '',
+      '<app-banner-courses></app-banner-courses>',
+      '',
+      'Text.',
+    ].join('\n');
+
+    const { content } = cleanMarkdown(raw);
+
+    expect(content).not.toContain('app-banner');
+    expect(content).toContain('### Guards');
+    expect(content).toContain('Text.');
+  });
+
+  it('leaves a figure block inside a fenced code block untouched', () => {
+    const raw = [
+      '```html',
+      '<figure><img src="/assets/example.png" /></figure>',
+      '```',
+    ].join('\n');
+
+    const { content } = cleanMarkdown(raw);
+
+    expect(content).toContain('<figure>');
+    expect(content).toContain('<img');
+  });
 });
