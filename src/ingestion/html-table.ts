@@ -7,10 +7,21 @@ export const TABLE_OPEN = /<table[\s>]/i;
 export const TABLE_CLOSE = /<\/table>/i;
 
 const ROW = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-const CELL = /<(t[dh])[^>]*>([\s\S]*?)<\/\1>/gi;
+// Lenient about a missing close tag: the corpus has rows whose <td> is never
+// closed (the source relies on the next <td> or </tr> to end it), so a cell
+// runs up to whichever of "the next cell" or "the end of the row" comes
+// first, rather than requiring its own matching close tag.
+const CELL = /<(t[dh])[^>]*>([\s\S]*?)(?=<\/t[dh]\s*>|<t[dh][^>]*>|$)/gi;
 const CODE = /<code>([\s\S]*?)<\/code>/gi;
-const LINK = /<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+// A private-use-area sentinel, not a control character, so a <code> body can
+// be pulled out and restored around the tag-stripping pass without a stray
+// generic's angle brackets (e.g. `Promise<void>`) being read as a tag.
+const CODE_PLACEHOLDER = '';
+const LINK = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+// Matches whichever quoting style the source used, or none at all.
+const HREF_ATTR = /href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i;
 const EMPHASIS = /<(strong|b)>([\s\S]*?)<\/\1>/gi;
+const BREAK = /<br\s*\/?>/gi;
 const REMAINING_TAG = /<[^>]+>/g;
 
 interface Row {
@@ -92,22 +103,59 @@ function parseRows(html: string): Row[] {
 }
 
 function renderCell(html: string): string {
-  return (
-    html
-      .replace(CODE, '`$1`')
-      .replace(LINK, '[$2]($1)')
+  // Lifted out, entities and all, before the generic tag-stripping pass below
+  // runs. A raw generic inside a code sample (`Promise<void>`) is otherwise
+  // indistinguishable from a real tag once REMAINING_TAG sees it.
+  const codeBodies: string[] = [];
+  const withoutCode = html.replace(CODE, (_match, body: string) => {
+    codeBodies.push(decodeEntities(body).replace(/\s+/g, ' ').trim());
+    return CODE_PLACEHOLDER;
+  });
+
+  const rendered = decodeEntities(
+    withoutCode
+      .replace(LINK, linkReplacer)
       .replace(EMPHASIS, '**$2**')
-      .replace(REMAINING_TAG, '')
-      .replace(/&#123;/g, '{')
-      .replace(/&#125;/g, '}')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&amp;/g, '&')
-      .replace(/&quot;/g, '"')
-      // A cell may wrap across source lines; a markdown row is one line.
-      .replace(/\s+/g, ' ')
-      // Escaped after tag removal so a pipe introduced by decoding is caught too.
-      .replace(/\|/g, '\\|')
-      .trim()
-  );
+      // Must run before REMAINING_TAG: stripped outright, <br> would fuse
+      // the words on either side of it instead of separating them.
+      .replace(BREAK, ' ')
+      .replace(REMAINING_TAG, ''),
+  )
+    // A cell may wrap across source lines; a markdown row is one line.
+    .replace(/\s+/g, ' ')
+    // Escaped after tag removal so a pipe introduced by decoding is caught too.
+    .replace(/\|/g, '\\|')
+    .trim();
+
+  let nextCodeBody = 0;
+  return rendered.replaceAll(CODE_PLACEHOLDER, () => {
+    const body = codeBodies[nextCodeBody];
+    nextCodeBody += 1;
+    return body === undefined ? '' : `\`${body.replace(/\|/g, '\\|')}\``;
+  });
+}
+
+function linkReplacer(_match: string, attrs: string, text: string): string {
+  const hrefMatch = HREF_ATTR.exec(attrs);
+
+  // No href, or one this pattern can't parse: keep the text rather than
+  // let the whole anchor vanish.
+  if (hrefMatch === null) {
+    return text;
+  }
+
+  const href = hrefMatch[1] ?? hrefMatch[2] ?? hrefMatch[3] ?? '';
+
+  return `[${text}](${href})`;
+}
+
+function decodeEntities(text: string): string {
+  return text
+    .replace(/&#123;/g, '{')
+    .replace(/&#125;/g, '}')
+    .replace(/&#124;/g, '|')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"');
 }

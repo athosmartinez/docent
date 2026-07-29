@@ -85,4 +85,95 @@ describe('convertHtmlTable', () => {
 
     expect(convertHtmlTable(html)).toBe(html);
   });
+
+  // content/microservices/nats.md leaves the second <td> of these rows open;
+  // only the following <tr> (or the table's end) closes it in practice.
+  it('keeps a cell whose closing </td> is missing from the source', () => {
+    const html = [
+      '<table>',
+      '  <tr>',
+      '    <td><code>gracefulShutdown</code></td>',
+      '    <td>Enables graceful shutdown. Default is <code>false</code>.',
+      '  </tr>',
+      '  <tr>',
+      '    <td><code>queue</code></td>',
+      '    <td>Queue name which your server will listen to</td>',
+      '  </tr>',
+      '</table>',
+    ].join('\n');
+
+    expect(convertHtmlTable(html)).toBe(
+      [
+        '- `gracefulShutdown` — Enables graceful shutdown. Default is `false`.',
+        '- `queue` — Queue name which your server will listen to',
+      ].join('\n'),
+    );
+  });
+
+  // content/techniques/versioning.md writes every href in this table with
+  // single quotes.
+  it('turns a single-quoted href into a markdown link', () => {
+    const html =
+      "<table><tr><td><a href='techniques/versioning#uri-versioning-type'><code>URI Versioning</code></a></td><td>The version will be passed within the URI of the request (default)</td></tr></table>";
+
+    expect(convertHtmlTable(html)).toBe(
+      '- [`URI Versioning`](techniques/versioning#uri-versioning-type) — The version will be passed within the URI of the request (default)',
+    );
+  });
+
+  it('turns an unquoted href into a markdown link', () => {
+    const html =
+      '<table><tr><td><a href=https://example.com/s.ts>serializer</a></td><td>x</td></tr></table>';
+
+    expect(convertHtmlTable(html)).toBe(
+      '- [serializer](https://example.com/s.ts) — x',
+    );
+  });
+
+  it('keeps the text of a link with no href rather than dropping it', () => {
+    const html =
+      '<table><tr><td><a name="anchor">bare anchor</a></td><td>x</td></tr></table>';
+
+    expect(convertHtmlTable(html)).toBe('- bare anchor — x');
+  });
+
+  // A generic's angle brackets read like a tag once REMAINING_TAG runs, unless
+  // the <code> body is protected from tag stripping first. Not present in the
+  // current corpus, but typical of NestJS's typed API docs.
+  it('does not let a generic inside <code> be mistaken for an HTML tag', () => {
+    const html =
+      '<table><tr><td><code>Promise<void></code></td><td><code>Record<string, number></code></td></tr></table>';
+
+    expect(convertHtmlTable(html)).toBe(
+      '- `Promise<void>` — `Record<string, number>`',
+    );
+  });
+
+  it('decodes an entity inside <code> without exposing it to tag stripping', () => {
+    const html =
+      '<table><tr><td><code>Array&lt;string&gt;</code></td><td>x</td></tr></table>';
+
+    expect(convertHtmlTable(html)).toBe('- `Array<string>` — x');
+  });
+
+  // content/controllers.md uses <br /> to separate sentences within a cell;
+  // dropping the tag outright fuses the words on either side of it.
+  it('turns <br> into a space so adjacent words do not fuse', () => {
+    const html = '<table><tr><td>line1<br>line2</td><td>x</td></tr></table>';
+
+    expect(convertHtmlTable(html)).toBe('- line1 line2 — x');
+  });
+
+  it('turns a self-closing <br /> into a space too', () => {
+    const html =
+      '<table><tr><td>line one<br />line two</td><td>x</td></tr></table>';
+
+    expect(convertHtmlTable(html)).toBe('- line one line two — x');
+  });
+
+  it('decodes an escaped pipe entity and still escapes it for the table', () => {
+    const html = '<table><tr><td>a&#124;b</td><td>x</td></tr></table>';
+
+    expect(convertHtmlTable(html)).toBe('- a\\|b — x');
+  });
 });
