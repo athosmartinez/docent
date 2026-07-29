@@ -132,6 +132,16 @@ anything that talks to the network or to the database.
   including chunks whose own text contains none of those files. It says which files
   the document as a whole mentions, not which file a given chunk's example belongs to;
   code that reads it needs to treat it that way.
+- **An HTML table is atomic when chunking, like a fenced code block.** Chunks carry
+  no overlap, so a half beginning on a bare `<td>` can never be reassembled from what
+  precedes it. Tables are converted to markdown during cleaning — with a header row
+  they become markdown tables, without one they become definition lists, since a
+  two-column table with no header is a list of key-value pairs.
+- **Two atomic regions that are each individually correct can compose into a gap
+  neither has alone.** The chunker's fence and table trackers are the concrete case:
+  while inside a fence, the table's token accounting was skipped entirely, so an
+  unclosed table containing a fenced block escaped its own bound. A new atomic region
+  needs testing in combination with the existing ones, not only on its own.
 
 ## Security
 
