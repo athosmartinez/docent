@@ -110,6 +110,25 @@ describe('convertHtmlTable', () => {
     );
   });
 
+  // content/microservices/kafka.md and grpc.md wrap a long <a> tag across
+  // lines and split its closing tag as "</a\n      >" — a common way to hand
+  // -format long HTML without rendering a stray space around the link text.
+  it('turns a link whose closing tag is split across lines into a markdown link', () => {
+    const html = [
+      '<table><tr><td>Client configuration options (read more',
+      '      <a',
+      '        href="https://kafka.js.org/docs/configuration"',
+      '        rel="nofollow"',
+      '        target="blank"',
+      '        >here</a',
+      '      >)</td><td>x</td></tr></table>',
+    ].join('\n');
+
+    expect(convertHtmlTable(html)).toBe(
+      '- Client configuration options (read more [here](https://kafka.js.org/docs/configuration)) — x',
+    );
+  });
+
   // content/techniques/versioning.md writes every href in this table with
   // single quotes.
   it('turns a single-quoted href into a markdown link', () => {
@@ -175,5 +194,23 @@ describe('convertHtmlTable', () => {
     const html = '<table><tr><td>a&#124;b</td><td>x</td></tr></table>';
 
     expect(convertHtmlTable(html)).toBe('- a\\|b — x');
+  });
+
+  // The restore step assumes every code-placeholder character in the
+  // rendered string is one the converter inserted. A literal copy of that
+  // character already present in the source breaks the assumption and
+  // consumes a <code> slot out of order, landing the real content in the
+  // wrong place and leaving an empty backtick pair where it belonged.
+  it('strips a stray code-placeholder character so it cannot steal a real code slot', () => {
+    const html =
+      '<table><tr><td>zap\u{e000}zap <code>real</code></td><td>x</td></tr></table>';
+
+    expect(convertHtmlTable(html)).toBe('- zapzap `real` — x');
+  });
+
+  it('strips a stray code-placeholder character even when the cell has no code block', () => {
+    const html = '<table><tr><td>zap\u{e000}zap</td><td>x</td></tr></table>';
+
+    expect(convertHtmlTable(html)).toBe('- zapzap — x');
   });
 });

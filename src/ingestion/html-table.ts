@@ -17,7 +17,10 @@ const CODE = /<code>([\s\S]*?)<\/code>/gi;
 // be pulled out and restored around the tag-stripping pass without a stray
 // generic's angle brackets (e.g. `Promise<void>`) being read as a tag.
 const CODE_PLACEHOLDER = '';
-const LINK = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+// Closing tag tolerates whitespace before '>': hand-wrapped long <a> tags in
+// the corpus split it as "</a\n      >" to avoid rendering a stray space
+// around the link text.
+const LINK = /<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi;
 // Matches whichever quoting style the source used, or none at all.
 const HREF_ATTR = /href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i;
 const EMPHASIS = /<(strong|b)>([\s\S]*?)<\/\1>/gi;
@@ -103,11 +106,19 @@ function parseRows(html: string): Row[] {
 }
 
 function renderCell(html: string): string {
+  // The restore step below trusts that every occurrence of the sentinel in
+  // the rendered string is one this function inserted. A literal copy
+  // already present in the source would break that trust and steal a slot
+  // meant for a real <code> body, so any pre-existing one is discarded
+  // first — a Private Use Area codepoint carries no meaning in
+  // documentation, so removing it loses nothing.
+  const sanitized = html.replaceAll(CODE_PLACEHOLDER, '');
+
   // Lifted out, entities and all, before the generic tag-stripping pass below
   // runs. A raw generic inside a code sample (`Promise<void>`) is otherwise
   // indistinguishable from a real tag once REMAINING_TAG sees it.
   const codeBodies: string[] = [];
-  const withoutCode = html.replace(CODE, (_match, body: string) => {
+  const withoutCode = sanitized.replace(CODE, (_match, body: string) => {
     codeBodies.push(decodeEntities(body).replace(/\s+/g, ' ').trim());
     return CODE_PLACEHOLDER;
   });
