@@ -539,4 +539,175 @@ describe('chunkMarkdown', () => {
       'Prose that must not be swallowed into the first section.',
     );
   });
+
+  it('bounds an unclosed table even when a fence larger than the bound is nested inside it', () => {
+    // The fence alone is ~7000 tokens, past the 6000-token bound on its own.
+    // A fence is still atomic — it cannot be split just because a table
+    // around it is misbehaving — so the chunk containing it is exactly as
+    // large as the fence forces it to be. What the fix guarantees is that
+    // nothing *after* the fence gets pulled in on top of it.
+    const fenceLines = Array.from(
+      { length: 1000 },
+      (_v, i) => `const v${i} = ${i};`,
+    );
+    const prose = Array.from(
+      { length: 100 },
+      (_v, i) => `Paragraph ${i} filler sentence after the fence.\n`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '<table>',
+      '  <tr><td>a</td><td>1</td></tr>',
+      '```typescript',
+      ...fenceLines,
+      '```',
+      ...prose,
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 100,
+      maxTokens: 200,
+      minTokens: 0,
+    });
+
+    expect(chunks).toHaveLength(10);
+
+    const [swallowed, ...rest] = chunks;
+
+    expect(swallowed?.content).toContain('<table>');
+    expect(swallowed?.content).not.toContain('</table>');
+    expect(swallowed?.tokenCount).toBe(7023);
+    // An odd fence-marker count would mean the fence itself got cut in half
+    // — still forbidden, table or no table.
+    expect((swallowed?.content.match(/```/g) ?? []).length).toBe(2);
+
+    // The prose after the fence chunks normally rather than continuing to
+    // be swallowed — proving the bound picked up the fence's size instead of
+    // treating it as invisible.
+    for (const chunk of rest) {
+      expect(chunk.tokenCount).toBeLessThanOrEqual(200);
+    }
+    expect(rest[rest.length - 1]?.content).toContain('Paragraph 99');
+  });
+
+  it('bounds an unclosed table containing a small fence, keeping the fence intact within the swallowed chunk', () => {
+    // At 50 lines the fence itself (~350 tokens) is nowhere near the bound on
+    // its own; the swallow only stops once the fence's tokens plus enough
+    // trailing prose add up to the same 6006-token trigger point the
+    // no-fence case hits, proving the fence's own size was actually counted
+    // rather than silently skipped.
+    const fenceLines = Array.from(
+      { length: 50 },
+      (_v, i) => `const v${i} = ${i};`,
+    );
+    const prose = Array.from(
+      { length: 500 },
+      (_v, i) =>
+        `Paragraph ${i} filler sentence to accumulate tokens for the unclosed table bound test.\n`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '<table>',
+      '  <tr><td>a</td><td>1</td></tr>',
+      '```typescript',
+      ...fenceLines,
+      '```',
+      ...prose,
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 100,
+      maxTokens: 200,
+      minTokens: 0,
+    });
+
+    expect(chunks).toHaveLength(23);
+
+    const [swallowed, ...rest] = chunks;
+
+    expect(swallowed?.content).toContain('<table>');
+    expect(swallowed?.content).not.toContain('</table>');
+    expect(swallowed?.tokenCount).toBe(6006);
+    expect((swallowed?.content.match(/```/g) ?? []).length).toBe(2);
+
+    for (const chunk of rest) {
+      expect(chunk.tokenCount).toBeLessThanOrEqual(200);
+    }
+    expect(rest[rest.length - 1]?.content).toContain('Paragraph 499');
+  });
+
+  it('leaves a closed table containing a fence unaffected, emitted whole', () => {
+    const fenceLines = Array.from(
+      { length: 20 },
+      (_v, i) => `const v${i} = ${i};`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '<table>',
+      '  <tr><td>a</td><td>1</td></tr>',
+      '```typescript',
+      ...fenceLines,
+      '```',
+      '  <tr><td>b</td><td>2</td></tr>',
+      '</table>',
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 20,
+      maxTokens: 50,
+      minTokens: 0,
+    });
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.tokenCount).toBe(184);
+    expect(chunks[0]?.content).toContain('<table>');
+    expect(chunks[0]?.content).toContain('</table>');
+    expect((chunks[0]?.content.match(/```/g) ?? []).length).toBe(2);
+  });
+
+  it('still does not treat table markup inside a fence as a table, with the fence-inclusive bound in place', () => {
+    // Guards the change in this round specifically: consume() is now fed on
+    // every line including fence content, so this proves that feeding it
+    // did not also loosen when a table is allowed to *open*. If it had, the
+    // prose below would be swallowed toward the table's bound instead of
+    // chunking normally at each paragraph break.
+    const prose = Array.from(
+      { length: 10 },
+      (_v, i) => `Paragraph ${i} of prose after the fenced example.\n`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '```html',
+      '<table>',
+      '  <tr><td>example</td></tr>',
+      '</table>',
+      '```',
+      ...prose,
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 20,
+      maxTokens: 50,
+      minTokens: 0,
+    });
+
+    expect(chunks).toHaveLength(6);
+
+    const [fenced, ...rest] = chunks;
+
+    expect(fenced?.tokenCount).toBe(32);
+    expect((fenced?.content.match(/```/g) ?? []).length).toBe(2);
+
+    // Normal paragraph-break chunking, not a table's much larger bound —
+    // proving the fence's example markup never opened a real table.
+    for (const chunk of rest) {
+      expect(chunk.content).not.toContain('<table');
+      expect(chunk.tokenCount).toBeLessThanOrEqual(50);
+    }
+    expect(rest[rest.length - 1]?.content).toContain('Paragraph 9');
+  });
 });

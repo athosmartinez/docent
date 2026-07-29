@@ -55,8 +55,17 @@ function quoteDepth(line: string): number {
 // small maxTokens for its own chunking preferences — a legitimate reference
 // table's real size has nothing to do with that per-call setting. At 5x the
 // default ceiling (6000 tokens) it sits comfortably above the largest table
-// this module is tested against (~5000 tokens) while leaving clear headroom
-// under the embedding limit even with some buffered prose ahead of the table.
+// this module is tested against (~5000 tokens).
+//
+// That 6000-token bound only leaves headroom under the embedding limit at
+// the default configuration, and it is a headroom claim, not a guarantee:
+// a caller can raise maxTokens past the embedding limit on its own (nothing
+// here polices that — chunk size by choice is the caller's call, not a
+// defect), and a fence nested inside the table is still atomic, so a fence
+// larger than the bound carries the chunk past it exactly as an equally
+// large fence would outside any table. What the bound does guarantee is
+// that the swallow stops growing once it is past — nothing after an
+// oversized fence or a caller's own large maxTokens gets pulled in on top.
 const UNCLOSED_TABLE_CEILING_MULTIPLE = 5;
 const UNCLOSED_TABLE_TOKEN_BOUND =
   UNCLOSED_TABLE_CEILING_MULTIPLE * DEFAULTS.maxTokens;
@@ -115,6 +124,14 @@ function createFenceTracker() {
  * reach here with no closing tag and no blockquote to bound it either. For
  * that case, the table closes once it has run past
  * `UNCLOSED_TABLE_TOKEN_BOUND` without meeting `</table>`.
+ *
+ * The caller must feed every line to `consume`, including fence markers and
+ * fence content, not just the lines it ends up routing as table content. A
+ * table's *bound* has to see everything that happens while it is open — a
+ * fence nested inside an unclosed table is still content the table is
+ * (wrongly) claiming, and its size has to count — even though a fence can
+ * still only *open* a table when the caller reports it is not inside one:
+ * table markup inside a fence stays an example, not structure.
  */
 function createTableTracker() {
   let insideTable = false;
@@ -128,9 +145,13 @@ function createTableTracker() {
     /**
      * Feeds one line; returns whether it belongs to a table. The closing line
      * counts as part of the table, so a caller cannot flush between the last
-     * row and `</table>`.
+     * row and `</table>`. `mayOpen` gates only the open transition — the
+     * caller passes `false` while it is inside a fence, so table markup
+     * there cannot start a table — everything else (the bound, the
+     * blockquote check, the literal close) applies regardless of `mayOpen`,
+     * because those all describe an *already-open* table, not a new one.
      */
-    consume(line: string): boolean {
+    consume(line: string, mayOpen: boolean): boolean {
       if (
         insideTable &&
         (quoteDepth(line) < openDepth ||
@@ -139,7 +160,7 @@ function createTableTracker() {
         insideTable = false;
       }
 
-      if (!insideTable && TABLE_OPEN.test(line)) {
+      if (!insideTable && mayOpen && TABLE_OPEN.test(line)) {
         insideTable = true;
         openDepth = quoteDepth(line);
         tokensSinceOpen = 0;
@@ -394,10 +415,7 @@ function splitAtSafeBoundaries(
   };
 
   for (const line of lines) {
-    if (fence.consume(line)) {
-      buffer.push(line);
-      continue;
-    }
+    const fenceMarker = fence.consume(line);
 
     // A table is only a table outside a fence; inside one it is an example of
     // markup, not content.
@@ -414,7 +432,18 @@ function splitAtSafeBoundaries(
       flush();
     }
 
-    if (!fence.insideFence && table.consume(line)) {
+    // Fed on every line, fence content included: a table's bound has to see
+    // everything that happens while it is open, or a fence nested inside an
+    // unclosed table would hide its own size from the very check meant to
+    // catch a table this large. Only the open transition stays fence-gated.
+    const insideTable = table.consume(line, !fence.insideFence);
+
+    if (fenceMarker) {
+      buffer.push(line);
+      continue;
+    }
+
+    if (!fence.insideFence && insideTable) {
       // Never a safe place to break, for the same reason as a fence: a
       // reference table split in half loses the half that has no header.
       buffer.push(line);
