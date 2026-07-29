@@ -40,6 +40,27 @@ function quoteDepth(line: string): number {
   return (prefix.match(/>/g) ?? []).length;
 }
 
+// A table that has run this many multiples of the *default* ceiling without
+// meeting a `</table>` is not a legitimate reference table left long on
+// purpose — it is a `<table>` whose closing tag is missing or malformed.
+// Left untreated, the table tracker would keep reporting every remaining
+// line as "part of the table", bypassing both the ceiling and the
+// paragraph-break flush and swallowing the rest of the section into one
+// chunk that can outgrow even an embedding model's input limit (8191 tokens
+// for the models this service targets).
+//
+// This is pinned to DEFAULTS.maxTokens rather than whatever maxTokens a
+// particular call is given: the bound polices a source *defect*, not normal
+// chunk sizing, so it has to stay meaningful even when a caller configures a
+// small maxTokens for its own chunking preferences — a legitimate reference
+// table's real size has nothing to do with that per-call setting. At 5x the
+// default ceiling (6000 tokens) it sits comfortably above the largest table
+// this module is tested against (~5000 tokens) while leaving clear headroom
+// under the embedding limit even with some buffered prose ahead of the table.
+const UNCLOSED_TABLE_CEILING_MULTIPLE = 5;
+const UNCLOSED_TABLE_TOKEN_BOUND =
+  UNCLOSED_TABLE_CEILING_MULTIPLE * DEFAULTS.maxTokens;
+
 /**
  * Tracks whether a scan is inside a fenced code block, aware of the
  * blockquote depth the fence opened at. A fence declared inside a
@@ -84,9 +105,21 @@ function createFenceTracker() {
  * same reason a fenced block is: half a reference table is worse than a chunk
  * that runs long, and because chunks carry no overlap, the half that begins on
  * a bare cell can never be reassembled from what precedes it.
+ *
+ * Atomic still has to end somewhere. Like `createFenceTracker`, a table
+ * closes without a literal `</table>` when the blockquote it opened in ends
+ * first — the table cannot outlive its container any more than a fence can.
+ * A table also needs a second escape a fence does not: `markdown-cleaner.ts`
+ * deliberately forwards a table it cannot convert as raw, unclosed HTML
+ * rather than dropping it, so a truncated or malformed source table can
+ * reach here with no closing tag and no blockquote to bound it either. For
+ * that case, the table closes once it has run past
+ * `UNCLOSED_TABLE_TOKEN_BOUND` without meeting `</table>`.
  */
 function createTableTracker() {
   let insideTable = false;
+  let openDepth = 0;
+  let tokensSinceOpen = 0;
 
   return {
     get insideTable(): boolean {
@@ -98,11 +131,25 @@ function createTableTracker() {
      * row and `</table>`.
      */
     consume(line: string): boolean {
+      if (
+        insideTable &&
+        (quoteDepth(line) < openDepth ||
+          tokensSinceOpen > UNCLOSED_TABLE_TOKEN_BOUND)
+      ) {
+        insideTable = false;
+      }
+
       if (!insideTable && TABLE_OPEN.test(line)) {
         insideTable = true;
+        openDepth = quoteDepth(line);
+        tokensSinceOpen = 0;
       }
 
       const partOfTable = insideTable;
+
+      if (insideTable) {
+        tokensSinceOpen += countTokens(line);
+      }
 
       if (insideTable && TABLE_CLOSE.test(line)) {
         insideTable = false;

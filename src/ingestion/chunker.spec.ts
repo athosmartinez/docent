@@ -377,4 +377,166 @@ describe('chunkMarkdown', () => {
       expect(fences % 2).toBe(0);
     }
   });
+
+  it('recovers from an unclosed table once enough content has piled up behind it', () => {
+    // No `</table>` anywhere in this document: a genuine source defect. Past
+    // the tracker's bound, the table has to give up and let the paragraphs
+    // behind it chunk normally rather than being read as table rows forever.
+    const prose = Array.from(
+      { length: 500 },
+      (_v, i) =>
+        `Paragraph ${i} filler sentence to accumulate tokens for the unclosed table bound test.\n`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '<table>',
+      '  <tr><td>a</td><td>1</td></tr>',
+      '  <tr><td>b</td><td>2</td></tr>',
+      '  <tr><td>c</td><td>3</td></tr>',
+      ...prose,
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 100,
+      maxTokens: 200,
+      minTokens: 0,
+    });
+
+    // The whole 500-paragraph document is nowhere near this small if it were
+    // swallowed into one chunk (it runs past 7000 tokens); recovering into
+    // 20 chunks proves the fallback engaged instead of reading to the end.
+    expect(chunks).toHaveLength(20);
+
+    const [swallowed, ...rest] = chunks;
+
+    // The unclosed table is still an open tag with nothing to balance it, so
+    // it never contains a `</table>` — that is the defect, not something
+    // this fix invents. What the fix bounds is how much it drags with it:
+    // 6006 tokens is the tracker's 6000-token bound plus the one line whose
+    // arrival crosses it, not the ~7000+ tokens the rest of the document
+    // would have added if the swallow had continued unbounded.
+    expect(swallowed?.content).toContain('<table>');
+    expect(swallowed?.content).not.toContain('</table>');
+    expect(swallowed?.tokenCount).toBe(6006);
+
+    // Ordinary paragraph-break chunking resumes immediately after recovery,
+    // each piece bounded by the call's own maxTokens rather than the escape
+    // bound — proving the escape hands control back rather than replacing
+    // the normal ceiling with a looser one.
+    for (const chunk of rest) {
+      expect(chunk.tokenCount).toBeLessThanOrEqual(200);
+    }
+    expect(rest[rest.length - 1]?.content).toContain('Paragraph 499');
+  });
+
+  it('still emits a legitimate table whole when it is larger than maxTokens but under the escape bound', () => {
+    // A properly closed table, well past maxTokens, proves the new escape
+    // bound only catches a table that never closes — it does not quietly
+    // turn into a second, smaller ceiling on tables that behave.
+    const rows = Array.from(
+      { length: 150 },
+      (_v, i) =>
+        `  <tr><td><code>option${i}</code></td><td>Description number ${i}</td></tr>`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '<table>',
+      ...rows,
+      '</table>',
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 100,
+      maxTokens: 300,
+      minTokens: 0,
+    });
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.tokenCount).toBe(3755);
+    expect(chunks[0]?.content).toContain('<table>');
+    expect(chunks[0]?.content).toContain('</table>');
+  });
+
+  it('leaves a blockquoted table that closes normally unaffected', () => {
+    const rows = Array.from(
+      { length: 5 },
+      (_v, i) => `> <tr><td>row${i}</td><td>value${i}</td></tr>`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '> <table>',
+      ...rows,
+      '> </table>',
+      '',
+      'Prose after the blockquoted table.',
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 20,
+      maxTokens: 50,
+      minTokens: 0,
+    });
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]?.tokenCount).toBe(108);
+    expect(chunks[0]?.content).toContain('> <table>');
+    expect(chunks[0]?.content).toContain('> </table>');
+    expect(chunks[1]?.content).toBe('Prose after the blockquoted table.');
+  });
+
+  it('closes a blockquoted table at the quote edge when the quote ends before </table> does', () => {
+    // The blockquote ends (a blank, unprefixed line) with no closing tag
+    // ever having appeared inside it — mirroring how a blockquoted fence
+    // that never closes ends at its container's edge rather than at end of
+    // document.
+    const rows = Array.from(
+      { length: 5 },
+      (_v, i) => `> <tr><td>row${i}</td><td>value${i}</td></tr>`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '> <table>',
+      ...rows,
+      '',
+      'Prose after the blockquote ends, before any closing tag.',
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 20,
+      maxTokens: 50,
+      minTokens: 0,
+    });
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]?.tokenCount).toBe(104);
+    expect(chunks[0]?.content).not.toContain('</table>');
+    expect(chunks[1]?.content).toBe(
+      'Prose after the blockquote ends, before any closing tag.',
+    );
+  });
+
+  it('still recognizes a heading following an unclosed table', () => {
+    const content = [
+      '### Page',
+      '#### First section',
+      '<table>',
+      '  <tr><td>a</td><td>1</td></tr>',
+      '',
+      '#### Second section',
+      'Prose that must not be swallowed into the first section.',
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, { minTokens: 0 });
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]?.headingPath.join(' > ')).toBe('Page > First section');
+    expect(chunks[1]?.headingPath.join(' > ')).toBe('Page > Second section');
+    expect(chunks[1]?.content).toBe(
+      'Prose that must not be swallowed into the first section.',
+    );
+  });
 });
