@@ -97,4 +97,67 @@ describe('cleanMarkdown', () => {
     expect(content).toContain('const b = 2;');
     expect(content).toContain('Between.');
   });
+
+  it('converts an HTML table in the body to markdown', () => {
+    const raw = [
+      '### Options',
+      '',
+      '<table>',
+      '  <tr><td><code>urls</code></td><td>Connection URLs</td></tr>',
+      '</table>',
+      '',
+      'After.',
+    ].join('\n');
+
+    const { content } = cleanMarkdown(raw);
+
+    expect(content).toContain('- `urls` — Connection URLs');
+    expect(content).not.toContain('<table>');
+    expect(content).not.toContain('<td>');
+    expect(content).toContain('### Options');
+    expect(content).toContain('After.');
+  });
+
+  it('leaves a table inside a fenced code block untouched', () => {
+    const raw = [
+      '```html',
+      '<table>',
+      '  <tr><td>example</td></tr>',
+      '</table>',
+      '```',
+    ].join('\n');
+
+    const { content } = cleanMarkdown(raw);
+
+    expect(content).toContain('<table>');
+    expect(content).toContain('<td>example</td>');
+  });
+
+  it('converts several tables in one document independently', () => {
+    const raw = [
+      '<table><tr><td>a</td><td>1</td></tr></table>',
+      '',
+      'Between.',
+      '',
+      '<table><tr><th>H</th></tr><tr><td>b</td></tr></table>',
+    ].join('\n');
+
+    const { content } = cleanMarkdown(raw);
+
+    expect(content).toContain('- a — 1');
+    expect(content).toContain('| H |');
+    expect(content).toContain('Between.');
+    expect(content).not.toContain('<table>');
+  });
+
+  it('leaves an unclosed table as it found it', () => {
+    const raw = ['<table>', '  <tr><td>a</td></tr>', 'no closing tag'].join(
+      '\n',
+    );
+
+    const { content } = cleanMarkdown(raw);
+
+    expect(content).toContain('<table>');
+    expect(content).toContain('no closing tag');
+  });
 });
