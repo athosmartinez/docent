@@ -6,11 +6,12 @@ Guidance for AI agents (and humans) working in this repository.
 
 `docent` is an **agentic RAG service** over docs/codebases, in **TypeScript / Nest.js**, with multi-provider LLM routing + fallback, cost tracking, an evaluation suite, and a native **MCP** server. See `README.md` for the public overview.
 
-## Current status — M0 complete
+## Current status — M1 complete
 
-The service boots, connects to PostgreSQL and Redis, and reports readiness at
-`GET /health`. There is no ingestion or retrieval yet. **Next milestone: M1**
-(ingestion pipeline) — see `_planning/03-roadmap.md`.
+The service ingests a documentation repository into embedded, indexed chunks:
+`POST /ingest` and `npm run ingest` both drive the same pipeline. There is no
+retrieval or answering yet — the `content_tsv` column and the vector index exist but
+nothing queries them. **Next milestone: M2** (core RAG) — see `_planning/03-roadmap.md`.
 
 ## The plan lives in `_planning/` (read it first)
 
@@ -42,10 +43,12 @@ the flags that will bite you first on the wrong runtime.
 - LLM access via OpenAI-compatible SDKs + OpenRouter · MCP via `@modelcontextprotocol/sdk`
 - Eval via promptfoo + LLM-as-judge
 
-Modules under `src/` today: **`common`** (config, database, redis, shared helpers) and
-**`health`**. The rest — `ingestion · retrieval · agent · llm · cost · mcp · eval · api`
-— are the target structure from `_planning/02-architecture.md`; each is created by the
-milestone that gives it content, not before.
+Modules under `src/` today: **`common`** (config, database, redis, shared helpers),
+**`health`**, **`ingestion`** (source fetching, markdown cleaning, chunking, and the
+repository that writes documents/chunks) and **`embeddings`** (the OpenAI embeddings
+provider). The rest — `retrieval · agent · llm · cost · mcp · eval · api` — are the
+target structure from `_planning/02-architecture.md`; each is created by the milestone
+that gives it content, not before.
 
 ## Commands
 
@@ -61,6 +64,7 @@ npm run format            # Prettier
 npm test                  # unit tests
 npm run test:e2e          # end-to-end tests (needs compose running)
 npm run build             # compile to dist/
+npm run ingest -- <source> [--include <glob>]   # ingest a docs repo or local path
 ```
 
 `npm run lint` is a hard gate: no `--fix`, and `--max-warnings 0`, so a warning fails
@@ -107,6 +111,27 @@ anything that talks to the network or to the database.
 - **Configuration is validated at boot** by zod in `src/common/config/env.schema.ts`.
   Anything new the code reads from the environment goes in that schema, with a
   constraint tight enough to fail at startup rather than at first use.
+- **Embedding results are matched by the API's `index` field, never by array
+  position.** The response order is not guaranteed, and pairing by position would
+  silently attach one chunk's vector to another.
+- **The chunk embedding dimensionality lives in exactly two places:** the migration's
+  `vector(3072)` and `CHUNK_EMBEDDING_DIMENSIONS` in
+  `src/common/database/schema.ts`, which configuration is validated against at boot.
+  The HNSW index casts to `halfvec` because pgvector caps a `vector` index at 2000
+  dimensions.
+- **`documents` and `chunks` rows outlive a source that ends `failed`.** Nothing
+  deletes them: `deleteSourceContent` runs at the *start* of a pipeline (to clear a
+  previous attempt before re-ingesting), never after a failure partway through. A
+  source that fails on document 80 of 136 still leaves the first 79 documents' chunks
+  committed. Anything that reads chunks must filter on `sources.status` (e.g. only
+  `'ready'`), or it will serve rows from a partially-ingested run as though the run had
+  completed.
+- **`chunks.metadata.filenames` is scoped to the document, not the chunk.** It is
+  computed once from every non-empty `@@filename(...)` directive found anywhere in the
+  source markdown, then copied onto every chunk produced from that document —
+  including chunks whose own text contains none of those files. It says which files
+  the document as a whole mentions, not which file a given chunk's example belongs to;
+  code that reads it needs to treat it that way.
 
 ## Security
 
