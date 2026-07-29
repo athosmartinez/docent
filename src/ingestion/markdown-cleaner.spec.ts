@@ -216,4 +216,55 @@ describe('cleanMarkdown', () => {
     expect(content).toContain('<figure>');
     expect(content).toContain('<img');
   });
+
+  it('keeps a surviving inline span mapped to its own content when a figure between two spans is removed', () => {
+    const raw =
+      'Use `foo` here. <figure><figcaption>See `bar` for detail</figcaption></figure> Then use `baz` too.';
+
+    const { content } = cleanMarkdown(raw);
+
+    expect(content).toBe('Use `foo` here.  Then use `baz` too.');
+  });
+
+  it('keeps a surviving fenced block mapped to its own content when a figure between two fences is removed', () => {
+    const raw = [
+      '```js',
+      'const a = 1;',
+      '```',
+      '',
+      '<figure>',
+      '```js',
+      'const b = 2;',
+      '```',
+      '</figure>',
+      '',
+      '```js',
+      'const c = 3;',
+      '```',
+    ].join('\n');
+
+    const { content } = cleanMarkdown(raw);
+
+    expect(content).toBe(
+      '```js\nconst a = 1;\n```\n\n```js\nconst c = 3;\n```',
+    );
+  });
+
+  it('keeps a real span mapped to its own content when a removed Angular component swallowed its own span', () => {
+    const raw =
+      'Intro. <app-foo>`inside`</app-foo> Real text with `outside` span.';
+
+    const { content } = cleanMarkdown(raw);
+
+    expect(content).toBe('Intro.  Real text with `outside` span.');
+  });
+
+  it('keeps every surviving span mapped to its own content across two removed figures', () => {
+    const raw =
+      'A `one` here. <figure>`two`</figure> B `three` here. <figure>`four`</figure> C `five` here.';
+
+    const { content } = cleanMarkdown(raw);
+
+    expect(content).toBe('A `one` here.  B `three` here.  C `five` here.');
+  });
 });

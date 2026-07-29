@@ -23,12 +23,33 @@ const INLINE_CODE = /`[^`\n]*`/g;
 // strips are run only after fences and inline code spans are lifted out to
 // a placeholder, and restored once the strip has passed; the same technique
 // the table converter uses to protect a cell's <code> body from its own
-// tag-stripping pass. Distinct private-use codepoints from the converter's
-// sentinel, spelled out via fromCodePoint rather than as a literal
-// character in the source, so the placeholder stays visible on review
-// instead of looking like an empty string.
-const FENCE_PLACEHOLDER = String.fromCodePoint(0xe001);
-const INLINE_CODE_PLACEHOLDER = String.fromCodePoint(0xe002);
+// tag-stripping pass.
+//
+// The placeholder carries its own array index rather than being a bare
+// repeated character restored by counting occurrences left to right:
+// FIGURE_BLOCK and ANGULAR_COMPONENT delete substrings, and a deleted
+// region can itself contain a placeholder (a span written *inside* the
+// figure or component being removed). A counter that just counts whatever
+// placeholders are still standing shifts every one after the deleted slot
+// onto the wrong content instead of dropping it — silently fabricating a
+// citation instead of losing one. Baking the index into the token turns
+// restoration into a lookup: a placeholder that survives always resolves
+// to its own content no matter how many others were deleted around it, and
+// one that gets deleted along with its enclosing block is simply never
+// looked up.
+//
+// A private-use codepoint, distinct from the table converter's own
+// (0xe000), sanitized out of the input first so source text cannot forge a
+// token — without a stray sentinel to work with, no digit sequence in the
+// source can ever read as one of ours.
+const PLACEHOLDER_MARK = String.fromCodePoint(0xe001);
+// Built via RegExp rather than a literal so the sentinel is written once,
+// as explicit source text, instead of appearing twice as an invisible
+// character inside a regex literal.
+const PLACEHOLDER = new RegExp(
+  `${PLACEHOLDER_MARK}(\\d+)${PLACEHOLDER_MARK}`,
+  'g',
+);
 
 /**
  * The Nest documentation carries markup that is not standard markdown: a
@@ -124,44 +145,32 @@ export function cleanMarkdown(raw: string): CleanedMarkdown {
  * as the subject being documented rather than decoration to drop.
  */
 function stripDecorativeMarkup(text: string): string {
-  // A pre-existing occurrence of either sentinel in the source would be
-  // mistaken for one of ours and stolen by the restore step below, so any
-  // prior occurrence is discarded first — the same collision the table
-  // converter had to close off for its own placeholder.
-  const sanitized = text
-    .replaceAll(FENCE_PLACEHOLDER, '')
-    .replaceAll(INLINE_CODE_PLACEHOLDER, '');
+  // A pre-existing occurrence of the sentinel in the source would let
+  // crafted text forge a fake placeholder token, so every occurrence is
+  // discarded first — the same collision the table converter had to close
+  // off for its own placeholder.
+  const sanitized = text.replaceAll(PLACEHOLDER_MARK, '');
 
-  const fences: string[] = [];
-  const withoutFences = sanitized.replace(FENCED_BLOCK, (match) => {
-    fences.push(match);
-    return FENCE_PLACEHOLDER;
-  });
+  const extracted: string[] = [];
+  const extract = (match: string): string => {
+    const index = extracted.push(match) - 1;
+    return `${PLACEHOLDER_MARK}${index}${PLACEHOLDER_MARK}`;
+  };
 
-  const inlineSpans: string[] = [];
-  const withoutInlineCode = withoutFences.replace(INLINE_CODE, (match) => {
-    inlineSpans.push(match);
-    return INLINE_CODE_PLACEHOLDER;
-  });
+  // Fences first, so a fence's own triple backtick is never mistaken for
+  // the start of an inline span; whatever backticks remain afterward are
+  // genuinely inline.
+  const withoutFences = sanitized.replace(FENCED_BLOCK, extract);
+  const withoutInlineCode = withoutFences.replace(INLINE_CODE, extract);
 
   const stripped = withoutInlineCode
     .replace(FIGURE_BLOCK, '')
     .replace(ANGULAR_COMPONENT, '');
 
-  let nextInlineSpan = 0;
-  const withInlineCodeRestored = stripped.replaceAll(
-    INLINE_CODE_PLACEHOLDER,
-    () => {
-      const span = inlineSpans[nextInlineSpan];
-      nextInlineSpan += 1;
-      return span ?? '';
-    },
-  );
-
-  let nextFence = 0;
-  return withInlineCodeRestored.replaceAll(FENCE_PLACEHOLDER, () => {
-    const fence = fences[nextFence];
-    nextFence += 1;
-    return fence ?? '';
+  // A lookup, not a walk: each surviving token names its own index, so it
+  // resolves to its own content regardless of how many other tokens were
+  // deleted along with the figure or component that enclosed them.
+  return stripped.replace(PLACEHOLDER, (_match, indexText: string) => {
+    return extracted[Number(indexText)] ?? '';
   });
 }
