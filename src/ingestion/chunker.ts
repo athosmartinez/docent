@@ -1,5 +1,7 @@
 import { encode } from 'gpt-tokenizer';
 
+import { TABLE_CLOSE, TABLE_OPEN } from './html-table';
+
 export interface Chunk {
   content: string;
   headingPath: string[];
@@ -73,6 +75,40 @@ function createFenceTracker() {
       }
 
       return true;
+    },
+  };
+}
+
+/**
+ * Tracks whether a scan is inside an HTML table. A table is atomic for the
+ * same reason a fenced block is: half a reference table is worse than a chunk
+ * that runs long, and because chunks carry no overlap, the half that begins on
+ * a bare cell can never be reassembled from what precedes it.
+ */
+function createTableTracker() {
+  let insideTable = false;
+
+  return {
+    get insideTable(): boolean {
+      return insideTable;
+    },
+    /**
+     * Feeds one line; returns whether it belongs to a table. The closing line
+     * counts as part of the table, so a caller cannot flush between the last
+     * row and `</table>`.
+     */
+    consume(line: string): boolean {
+      if (!insideTable && TABLE_OPEN.test(line)) {
+        insideTable = true;
+      }
+
+      const partOfTable = insideTable;
+
+      if (insideTable && TABLE_CLOSE.test(line)) {
+        insideTable = false;
+      }
+
+      return partOfTable;
     },
   };
 }
@@ -300,6 +336,7 @@ function splitAtSafeBoundaries(
 
   let buffer: string[] = [];
   const fence = createFenceTracker();
+  const table = createTableTracker();
 
   const flush = (): void => {
     if (buffer.join('').trim().length > 0) {
@@ -311,6 +348,28 @@ function splitAtSafeBoundaries(
 
   for (const line of lines) {
     if (fence.consume(line)) {
+      buffer.push(line);
+      continue;
+    }
+
+    // A table is only a table outside a fence; inside one it is an example of
+    // markup, not content.
+    const opensTable =
+      !fence.insideFence && !table.insideTable && TABLE_OPEN.test(line);
+
+    // Flushing before the table opens, rather than after its first row, lets a
+    // full buffer close cleanly and the table start a chunk of its own.
+    if (
+      opensTable &&
+      buffer.length > 0 &&
+      countTokens(buffer.join('\n')) >= targetTokens
+    ) {
+      flush();
+    }
+
+    if (!fence.insideFence && table.consume(line)) {
+      // Never a safe place to break, for the same reason as a fence: a
+      // reference table split in half loses the half that has no header.
       buffer.push(line);
       continue;
     }

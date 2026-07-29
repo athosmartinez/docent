@@ -276,17 +276,17 @@ describe('chunkMarkdown', () => {
   });
 
   it('falls back to a line-boundary split when a piece has no blank line to break at', () => {
-    // A raw HTML table with no blank line between rows: the paragraph-break
-    // split point never arrives, so the ceiling has to win some other way.
-    const tableRows = Array.from(
+    // A dense run of list items with no blank line between them: the
+    // paragraph-break split point never arrives, so the ceiling has to win
+    // some other way. (An HTML table is the other case that produces a run
+    // like this, but a table is atomic — see the dedicated table tests below
+    // — so this uses non-table content to exercise the line-boundary
+    // fallback on its own.)
+    const denseLines = Array.from(
       { length: 200 },
-      (_v, i) => `<tr><td>Row ${i}</td><td>Value ${i}</td></tr>`,
+      (_v, i) => `- Row ${i}: value ${i}`,
     ).join('\n');
-    const content = [
-      '### Page',
-      '#### Table',
-      `<table>\n${tableRows}\n</table>`,
-    ].join('\n');
+    const content = ['### Page', '#### List', denseLines].join('\n');
 
     const chunks = chunkMarkdown(content, {
       targetTokens: 100,
@@ -297,6 +297,84 @@ describe('chunkMarkdown', () => {
     expect(chunks.length).toBeGreaterThan(1);
     for (const chunk of chunks) {
       expect(chunk.tokenCount).toBeLessThanOrEqual(150);
+    }
+  });
+
+  it('never splits an HTML table, even past the ceiling', () => {
+    const rows = Array.from(
+      { length: 200 },
+      (_v, i) =>
+        `  <tr><td><code>option${i}</code></td><td>Description number ${i}</td></tr>`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '<table>',
+      ...rows,
+      '</table>',
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 100,
+      maxTokens: 150,
+      minTokens: 0,
+    });
+
+    for (const chunk of chunks) {
+      const opens = (chunk.content.match(/<table/gi) ?? []).length;
+      const closes = (chunk.content.match(/<\/table>/gi) ?? []).length;
+
+      expect(opens).toBe(closes);
+    }
+  });
+
+  it('flushes before a table rather than cutting into it', () => {
+    const prose = Array.from(
+      { length: 40 },
+      (_v, i) => `Paragraph ${i} of prose.\n`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      ...prose,
+      '<table>',
+      '  <tr><td>a</td><td>1</td></tr>',
+      '  <tr><td>b</td><td>2</td></tr>',
+      '</table>',
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 60,
+      maxTokens: 100,
+      minTokens: 0,
+    });
+
+    const withTable = chunks.filter((c) => /<table/i.test(c.content));
+
+    expect(withTable).toHaveLength(1);
+    expect(withTable[0]?.content).toContain('</table>');
+  });
+
+  it('does not treat table markup inside a fence as a table', () => {
+    const content = [
+      '### Page',
+      '#### Section',
+      '```html',
+      '<table>',
+      '  <tr><td>example</td></tr>',
+      '</table>',
+      '```',
+      '',
+      'Prose after the example.',
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, { minTokens: 0 });
+
+    expect(chunks.length).toBeGreaterThan(0);
+    for (const chunk of chunks) {
+      const fences = (chunk.content.match(/```/g) ?? []).length;
+
+      expect(fences % 2).toBe(0);
     }
   });
 });
