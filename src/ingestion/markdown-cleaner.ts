@@ -97,7 +97,12 @@ export function cleanMarkdown(raw: string): CleanedMarkdown {
       continue;
     }
 
-    if (!insideFence && TABLE_OPEN.test(line)) {
+    // Checked against the line with inline code spans removed, not the raw
+    // line: prose documenting the tag itself (`` `<table>` ``) reads
+    // identically to a real opening tag once TABLE_OPEN sees the raw text,
+    // and there is no later `</table>` to close a buffer that should never
+    // have opened — it swallows the rest of the document instead.
+    if (!insideFence && TABLE_OPEN.test(line.replace(INLINE_CODE, ''))) {
       tableBuffer = [line];
 
       if (TABLE_CLOSE.test(line)) {

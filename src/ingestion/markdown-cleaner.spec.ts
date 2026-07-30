@@ -267,4 +267,40 @@ describe('cleanMarkdown', () => {
 
     expect(content).toBe('A `one` here.  B `three` here.  C `five` here.');
   });
+
+  it('does not open a table buffer on `<table>` mentioned inside an inline code span', () => {
+    // TABLE_OPEN tested against the raw line with no inline-code awareness
+    // would read this as the start of a real table, then buffer the rest of
+    // the document behind it: no later `</table>` ever arrives, so the fence
+    // below loses its closing marker and the @@filename directive is read as
+    // ordinary buffered text instead of being extracted.
+    const raw = [
+      'Use the `<table>` element for tabular data.',
+      '',
+      '```typescript',
+      '@@filename(auth.guard)',
+      'const x = 1;',
+      '```',
+    ].join('\n');
+
+    const { content, filenames } = cleanMarkdown(raw);
+
+    expect(filenames).toEqual(['auth.guard']);
+    expect(content).not.toContain('@@filename');
+    expect(content).toContain('const x = 1;');
+    expect((content.match(/```/g) ?? []).length).toBe(2);
+  });
+
+  it('still opens a table buffer for a real <table> on a line that also carries an unrelated inline code span', () => {
+    const raw = [
+      '<table> see `example` below',
+      '  <tr><td>a</td><td>1</td></tr>',
+      '</table>',
+    ].join('\n');
+
+    const { content } = cleanMarkdown(raw);
+
+    expect(content).toContain('- a — 1');
+    expect(content).not.toContain('<table');
+  });
 });
