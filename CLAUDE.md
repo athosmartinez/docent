@@ -132,6 +132,22 @@ anything that talks to the network or to the database.
   including chunks whose own text contains none of those files. It says which files
   the document as a whole mentions, not which file a given chunk's example belongs to;
   code that reads it needs to treat it that way.
+- **A table is atomic when chunking, like a fenced code block — in both the form
+  it arrives in and the form it leaves in.** Chunks carry no overlap, so a half
+  beginning on a bare `<td>` or a bare pipe row can never be reassembled from what
+  precedes it. Tables are converted to markdown during cleaning — with a header row
+  they become markdown (pipe) tables, without one they become definition lists,
+  since a two-column table with no header is a list of key-value pairs. The
+  production corpus contains no raw `<table>` markup once cleaning has run, so the
+  chunker's HTML-table tracker only guards a shape conversion failed to read; the
+  markdown-table tracker guards the pipe tables that actually ship, and is what
+  closes the defect on the real path. A definition list is not made atomic — its
+  `- \`key\` — value` lines are individually self-contained and safe to split.
+- **Two atomic regions that are each individually correct can compose into a gap
+  neither has alone.** The chunker's fence and table trackers are the concrete case:
+  while inside a fence, the table's token accounting was skipped entirely, so an
+  unclosed table containing a fenced block escaped its own bound. A new atomic region
+  needs testing in combination with the existing ones, not only on its own.
 
 ## Security
 

@@ -1,5 +1,7 @@
 import { encode } from 'gpt-tokenizer';
 
+import { TABLE_CLOSE, TABLE_OPEN } from './html-table';
+
 export interface Chunk {
   content: string;
   headingPath: string[];
@@ -38,6 +40,36 @@ function quoteDepth(line: string): number {
   return (prefix.match(/>/g) ?? []).length;
 }
 
+// A table that has run this many multiples of the *default* ceiling without
+// meeting a `</table>` is not a legitimate reference table left long on
+// purpose — it is a `<table>` whose closing tag is missing or malformed.
+// Left untreated, the table tracker would keep reporting every remaining
+// line as "part of the table", bypassing both the ceiling and the
+// paragraph-break flush and swallowing the rest of the section into one
+// chunk that can outgrow even an embedding model's input limit (8191 tokens
+// for the models this service targets).
+//
+// This is pinned to DEFAULTS.maxTokens rather than whatever maxTokens a
+// particular call is given: the bound polices a source *defect*, not normal
+// chunk sizing, so it has to stay meaningful even when a caller configures a
+// small maxTokens for its own chunking preferences — a legitimate reference
+// table's real size has nothing to do with that per-call setting. At 5x the
+// default ceiling (6000 tokens) it sits comfortably above the largest table
+// this module is tested against (~5000 tokens).
+//
+// That 6000-token bound only leaves headroom under the embedding limit at
+// the default configuration, and it is a headroom claim, not a guarantee:
+// a caller can raise maxTokens past the embedding limit on its own (nothing
+// here polices that — chunk size by choice is the caller's call, not a
+// defect), and a fence nested inside the table is still atomic, so a fence
+// larger than the bound carries the chunk past it exactly as an equally
+// large fence would outside any table. What the bound does guarantee is
+// that the swallow stops growing once it is past — nothing after an
+// oversized fence or a caller's own large maxTokens gets pulled in on top.
+const UNCLOSED_TABLE_CEILING_MULTIPLE = 5;
+const UNCLOSED_TABLE_TOKEN_BOUND =
+  UNCLOSED_TABLE_CEILING_MULTIPLE * DEFAULTS.maxTokens;
+
 /**
  * Tracks whether a scan is inside a fenced code block, aware of the
  * blockquote depth the fence opened at. A fence declared inside a
@@ -73,6 +105,139 @@ function createFenceTracker() {
       }
 
       return true;
+    },
+  };
+}
+
+/**
+ * Tracks whether a scan is inside an HTML table. A table is atomic for the
+ * same reason a fenced block is: half a reference table is worse than a chunk
+ * that runs long, and because chunks carry no overlap, the half that begins on
+ * a bare cell can never be reassembled from what precedes it.
+ *
+ * Atomic still has to end somewhere. Like `createFenceTracker`, a table
+ * closes without a literal `</table>` when the blockquote it opened in ends
+ * first — the table cannot outlive its container any more than a fence can.
+ * A table also needs a second escape a fence does not: `markdown-cleaner.ts`
+ * deliberately forwards a table it cannot convert as raw, unclosed HTML
+ * rather than dropping it, so a truncated or malformed source table can
+ * reach here with no closing tag and no blockquote to bound it either. For
+ * that case, the table closes once it has run past
+ * `UNCLOSED_TABLE_TOKEN_BOUND` without meeting `</table>`.
+ *
+ * The caller must feed every line to `consume`, including fence markers and
+ * fence content, not just the lines it ends up routing as table content. A
+ * table's *bound* has to see everything that happens while it is open — a
+ * fence nested inside an unclosed table is still content the table is
+ * (wrongly) claiming, and its size has to count — even though a fence can
+ * still only *open* a table when the caller reports it is not inside one:
+ * table markup inside a fence stays an example, not structure.
+ */
+function createTableTracker() {
+  let insideTable = false;
+  let openDepth = 0;
+  let tokensSinceOpen = 0;
+
+  return {
+    get insideTable(): boolean {
+      return insideTable;
+    },
+    /**
+     * Feeds one line; returns whether it belongs to a table. The closing line
+     * counts as part of the table, so a caller cannot flush between the last
+     * row and `</table>`. `mayOpen` gates only the open transition — the
+     * caller passes `false` while it is inside a fence, so table markup
+     * there cannot start a table — everything else (the bound, the
+     * blockquote check, the literal close) applies regardless of `mayOpen`,
+     * because those all describe an *already-open* table, not a new one.
+     */
+    consume(line: string, mayOpen: boolean): boolean {
+      if (
+        insideTable &&
+        (quoteDepth(line) < openDepth ||
+          tokensSinceOpen > UNCLOSED_TABLE_TOKEN_BOUND)
+      ) {
+        insideTable = false;
+      }
+
+      if (!insideTable && mayOpen && TABLE_OPEN.test(line)) {
+        insideTable = true;
+        openDepth = quoteDepth(line);
+        tokensSinceOpen = 0;
+      }
+
+      const partOfTable = insideTable;
+
+      if (insideTable) {
+        tokensSinceOpen += countTokens(line);
+      }
+
+      if (insideTable && TABLE_CLOSE.test(line)) {
+        insideTable = false;
+      }
+
+      return partOfTable;
+    },
+  };
+}
+
+// A markdown table row, per CommonMark's pipe-table syntax: a line whose
+// first non-whitespace character is `|`.
+const MD_TABLE_ROW = /^\s*\|/;
+
+/**
+ * Tracks whether a scan is inside a markdown ("pipe") table — a contiguous
+ * run of lines matching `MD_TABLE_ROW`. This is the table shape
+ * `convertHtmlTable` emits for a table that had a header row, and it is
+ * atomic for the same reason the HTML table it replaced was: a half
+ * beginning mid-table has no header and no separator to signal what it is,
+ * and chunks carry no overlap to recover it from.
+ *
+ * Unlike an HTML table, a pipe table has no open/close markup of its own —
+ * the run simply ends at the first line that is not one. That means it also
+ * has no way to signal it is "unclosed": a run that never ends is
+ * indistinguishable from a legitimately huge table from inside the tracker,
+ * so the same `UNCLOSED_TABLE_TOKEN_BOUND` escape the HTML tracker uses
+ * applies here too, bounding a pathological run of `|` lines the same way.
+ *
+ * `mayOpen` gates only the open transition, mirroring `createTableTracker`:
+ * the caller passes `false` while inside a fence or an already-open HTML
+ * table, so a `|`-prefixed line there is example content or table-cell text,
+ * not the start of a new atomic region. Two atomic regions have to be
+ * checked in combination, not only alone — a fence or an HTML table that
+ * failed to gate this tracker's open transition would let it start a
+ * conflicting region of its own inside one that is already open.
+ */
+function createMarkdownTableTracker() {
+  let insideTable = false;
+  let tokensSinceOpen = 0;
+
+  return {
+    get insideTable(): boolean {
+      return insideTable;
+    },
+    /** Feeds one line; returns whether it belongs to a markdown table. */
+    consume(line: string, mayOpen: boolean): boolean {
+      if (insideTable && tokensSinceOpen > UNCLOSED_TABLE_TOKEN_BOUND) {
+        insideTable = false;
+      }
+
+      const isRow = MD_TABLE_ROW.test(line);
+
+      if (!insideTable && mayOpen && isRow) {
+        insideTable = true;
+        tokensSinceOpen = 0;
+      } else if (insideTable && !isRow) {
+        insideTable = false;
+      }
+
+      const partOfTable = insideTable && isRow;
+
+      if (partOfTable) {
+        tokensSinceOpen += countTokens(line);
+      }
+
+      return partOfTable;
     },
   };
 }
@@ -300,6 +465,8 @@ function splitAtSafeBoundaries(
 
   let buffer: string[] = [];
   const fence = createFenceTracker();
+  const table = createTableTracker();
+  const mdTable = createMarkdownTableTracker();
 
   const flush = (): void => {
     if (buffer.join('').trim().length > 0) {
@@ -310,7 +477,62 @@ function splitAtSafeBoundaries(
   };
 
   for (const line of lines) {
-    if (fence.consume(line)) {
+    const fenceMarker = fence.consume(line);
+
+    // Each kind of table may only open outside a fence and outside the
+    // other kind; inside either, its markup is an example or a cell's text,
+    // not structure of its own. Read before either tracker consumes the
+    // line, so the gate reflects the state coming into this line rather than
+    // one tracker's own transition on it.
+    //
+    // The two gates diverge on one shape: a `<table>` line landing right
+    // after a markdown run's last row, with no blank line between them. That
+    // line is not itself a pipe row — MD_TABLE_ROW does not match it — so
+    // gating the HTML tracker on "a markdown table happens to be open"
+    // rather than "this line is markdown-table content" costs the only line
+    // TABLE_OPEN can ever match: past it, no later line reopens the chance,
+    // and the HTML table gets no protection at all. The markdown tracker
+    // needs no matching exception — every line it could open on already
+    // matches MD_TABLE_ROW, so "the other tracker is open" and "this line is
+    // the other tracker's content" coincide for it.
+    const isMdTableRow = MD_TABLE_ROW.test(line);
+    const mayOpenHtmlTable =
+      !fence.insideFence &&
+      !table.insideTable &&
+      !(mdTable.insideTable && isMdTableRow);
+    const mayOpenMdTable =
+      !fence.insideFence && !table.insideTable && !mdTable.insideTable;
+    const opensTable = mayOpenHtmlTable && TABLE_OPEN.test(line);
+    const opensMdTable = mayOpenMdTable && isMdTableRow;
+
+    // Flushing before the table opens, rather than after its first row, lets a
+    // full buffer close cleanly and the table start a chunk of its own.
+    if (
+      (opensTable || opensMdTable) &&
+      buffer.length > 0 &&
+      countTokens(buffer.join('\n')) >= targetTokens
+    ) {
+      flush();
+    }
+
+    // Fed on every line, fence content included: a table's bound has to see
+    // everything that happens while it is open, or a fence nested inside an
+    // unclosed table would hide its own size from the very check meant to
+    // catch a table this large. Only the open transition stays gated.
+    const insideTable = table.consume(line, mayOpenHtmlTable);
+    const insideMdTable = mdTable.consume(line, mayOpenMdTable);
+
+    if (fenceMarker) {
+      buffer.push(line);
+      continue;
+    }
+
+    if (!fence.insideFence && (insideTable || insideMdTable)) {
+      // Never a safe place to break, for the same reason as a fence: a
+      // reference table split in half loses the half that has no header —
+      // and a markdown pipe table, with no blank line anywhere inside it,
+      // has nothing else to stop the ceiling fallback below from cutting
+      // into it.
       buffer.push(line);
       continue;
     }
