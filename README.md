@@ -47,7 +47,7 @@ Unlike a typical demo chatbot, `docent` is built like a real backend service, in
 ```mermaid
 flowchart TB
   subgraph Ingestion["📥 Ingestion pipeline"]
-    SRC["Docs · Code (planned)"] --> CHUNK["Loader & Chunker"]
+    SRC["Docs · Code (planned)"] --> CHUNK["Loader & Chunker (structure-aware)"]
     CHUNK --> EMB["Embeddings"]
     EMB --> VEC[("PostgreSQL + pgvector")]
   end
@@ -67,7 +67,7 @@ flowchart TB
   AGENT -.-> CACHE[("Redis Cache")]
 ```
 
-**Ingestion** turns sources into searchable knowledge: load → chunk (code-aware) → embed → store in `pgvector`.
+**Ingestion** turns sources into searchable knowledge: load → chunk (structure-aware: headings, fenced code and tables are never split) → embed → store in `pgvector`.
 **Query** *(planned)* will answer a question: the agent plans, retrieves relevant chunks, calls an LLM (with fallback), and returns a grounded answer with citations — while cost and tokens are logged.
 
 ---
@@ -139,7 +139,7 @@ curl -X POST localhost:3000/ingest \
 # { "sourceId": "...", "status": "pending" }
 
 curl localhost:3000/sources/<sourceId>
-# { "status": "ready", "document_count": 136, "chunk_count": 842, ... }
+# { "status": "ready", "document_count": 136, "chunk_count": 839, ... }
 ```
 
 > **Known limitation:** ingestion runs in-process. If the service is interrupted
@@ -176,7 +176,8 @@ This makes it possible to answer, with numbers, *which* model and retrieval stra
 ## Roadmap
 
 - [x] **M0 — Bootstrap & infra** (Nest scaffold, docker-compose, config, CI skeleton, health check)
-- [x] **M1 — Ingestion pipeline** (loaders, code-aware chunking, embeddings, pgvector store)
+- [x] **M1 — Ingestion pipeline** (markdown loader, structure-aware chunking, embeddings, pgvector store)
+- [x] **M1.5 — Table handling** (HTML tables converted to markdown, never split across chunks)
 - [ ] **M2 — Core RAG** (retriever, grounded answers with citations, streaming, minimal UI)
 - [ ] **M3 — Production engine** (multi-provider router + fallback, cost/token ledger, caching)
 - [ ] **M4 — Agentic layer** (tool calling, multi-step planning, anti-hallucination guardrails)

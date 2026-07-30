@@ -6,12 +6,17 @@ Guidance for AI agents (and humans) working in this repository.
 
 `docent` is an **agentic RAG service** over docs/codebases, in **TypeScript / Nest.js**, with multi-provider LLM routing + fallback, cost tracking, an evaluation suite, and a native **MCP** server. See `README.md` for the public overview.
 
-## Current status — M1 complete
+## Current status — M1.5 complete
 
 The service ingests a documentation repository into embedded, indexed chunks:
-`POST /ingest` and `npm run ingest` both drive the same pipeline. There is no
-retrieval or answering yet — the `content_tsv` column and the vector index exist but
-nothing queries them. **Next milestone: M2** (core RAG) — see `_planning/03-roadmap.md`.
+`POST /ingest` and `npm run ingest` both drive the same pipeline. M1.5 then made
+tables survive that pipeline — converted to markdown during cleaning, and indivisible
+when chunking. There is no retrieval or answering yet — the `content_tsv` column and
+the vector index exist but nothing queries them. **Next milestone: M2** (core RAG) —
+see `_planning/03-roadmap.md`.
+
+The ingested corpus today is the Nest documentation: 136 documents, 839 chunks,
+every one embedded, largest 1182 tokens.
 
 ## The plan lives in `_planning/` (read it first)
 
@@ -44,11 +49,12 @@ the flags that will bite you first on the wrong runtime.
 - Eval via promptfoo + LLM-as-judge
 
 Modules under `src/` today: **`common`** (config, database, redis, shared helpers),
-**`health`**, **`ingestion`** (source fetching, markdown cleaning, chunking, and the
-repository that writes documents/chunks) and **`embeddings`** (the OpenAI embeddings
-provider). The rest — `retrieval · agent · llm · cost · mcp · eval · api` — are the
-target structure from `_planning/02-architecture.md`; each is created by the milestone
-that gives it content, not before.
+**`health`**, **`ingestion`** (source fetching, markdown cleaning, HTML-table
+conversion, chunking, and the repository that writes documents/chunks) and
+**`embeddings`** (the OpenAI embeddings provider). The rest — `retrieval · agent ·
+llm · cost · mcp · eval · api` — are the target structure from
+`_planning/02-architecture.md`; each is created by the milestone that gives it
+content, not before.
 
 ## Commands
 
