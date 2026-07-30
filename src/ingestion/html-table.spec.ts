@@ -213,4 +213,36 @@ describe('convertHtmlTable', () => {
 
     expect(convertHtmlTable(html)).toBe('- zapzap — x');
   });
+
+  // REMAINING_TAG (`/<[^>]+>/g`) matches any run of non-`>` characters
+  // between a `<` and a `>` — including a placeholder sitting inside it. A
+  // restore keyed by walk order has no way to know that placeholder never
+  // reached the end: it hands the next surviving placeholder the deleted
+  // one's body instead of leaving it unresolved.
+  it('does not let a later code span take the identity of one a bogus-tag deletion swallowed', () => {
+    const html =
+      '<table><tr><td>Between < <code>alpha</code> > markers, plus <code>beta</code></td><td>x</td></tr></table>';
+
+    expect(convertHtmlTable(html)).toBe('- Between markers, plus `beta` — x');
+  });
+
+  // LINK discards its attribute group wholesale once the href is pulled out
+  // of it, so a <code> placeholder written into an attribute value (here,
+  // inside title="...") is deleted along with the rest of the attributes —
+  // the same swallow as REMAINING_TAG's, from a different regex.
+  it("does not let a code span inside a stripped link attribute take a later span's identity", () => {
+    const html =
+      '<table><tr><td><a href="https://e.com" title="<code>alpha</code>">link</a> then <code>beta</code></td><td>x</td></tr></table>';
+
+    expect(convertHtmlTable(html)).toBe(
+      '- [link](https://e.com) then `beta` — x',
+    );
+  });
+
+  it('resolves a third code span to its own content when the second was deleted between it and the first', () => {
+    const html =
+      '<table><tr><td><code>first</code> < <code>second</code> > <code>third</code></td><td>x</td></tr></table>';
+
+    expect(convertHtmlTable(html)).toBe('- `first` `third` — x');
+  });
 });

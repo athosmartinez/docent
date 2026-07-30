@@ -16,7 +16,26 @@ const CODE = /<code>([\s\S]*?)<\/code>/gi;
 // A private-use-area sentinel, not a control character, so a <code> body can
 // be pulled out and restored around the tag-stripping pass without a stray
 // generic's angle brackets (e.g. `Promise<void>`) being read as a tag.
-const CODE_PLACEHOLDER = '';
+//
+// The token carries its own index rather than being restored by a walk that
+// counts occurrences left to right: REMAINING_TAG matches any run of
+// non-`>` text between a `<` and a `>`, and LINK discards its attribute
+// group wholesale once the href is pulled out of it, so either can delete a
+// range that spans a placeholder along with unrelated text around it. A
+// counter has no way to know one placeholder vanished — it hands the next
+// surviving placeholder the deleted one's body instead of leaving it
+// unresolved, substituting one code span for another. Baking the index into
+// the token turns restoration into a lookup: a placeholder that survives
+// always resolves to its own body, and one deleted along with its enclosing
+// markup is simply never looked up.
+//
+// Written via String.fromCodePoint rather than as a literal invisible
+// character in source, which is unreadable and error-prone to edit.
+const CODE_PLACEHOLDER_MARK = String.fromCodePoint(0xe000);
+const CODE_PLACEHOLDER = new RegExp(
+  `${CODE_PLACEHOLDER_MARK}(\\d+)${CODE_PLACEHOLDER_MARK}`,
+  'g',
+);
 // Closing tag tolerates whitespace before '>': hand-wrapped long <a> tags in
 // the corpus split it as "</a\n      >" to avoid rendering a stray space
 // around the link text.
@@ -106,21 +125,23 @@ function parseRows(html: string): Row[] {
 }
 
 function renderCell(html: string): string {
-  // The restore step below trusts that every occurrence of the sentinel in
-  // the rendered string is one this function inserted. A literal copy
-  // already present in the source would break that trust and steal a slot
-  // meant for a real <code> body, so any pre-existing one is discarded
-  // first — a Private Use Area codepoint carries no meaning in
-  // documentation, so removing it loses nothing.
-  const sanitized = html.replaceAll(CODE_PLACEHOLDER, '');
+  // The restore step below trusts that every occurrence of the sentinel mark
+  // in the rendered string is one this function inserted. A literal copy
+  // already present in the source would break that trust and collide with a
+  // real token, so any pre-existing one is discarded first — a Private Use
+  // Area codepoint carries no meaning in documentation, so removing it loses
+  // nothing.
+  const sanitized = html.replaceAll(CODE_PLACEHOLDER_MARK, '');
 
   // Lifted out, entities and all, before the generic tag-stripping pass below
   // runs. A raw generic inside a code sample (`Promise<void>`) is otherwise
   // indistinguishable from a real tag once REMAINING_TAG sees it.
   const codeBodies: string[] = [];
   const withoutCode = sanitized.replace(CODE, (_match, body: string) => {
-    codeBodies.push(decodeEntities(body).replace(/\s+/g, ' ').trim());
-    return CODE_PLACEHOLDER;
+    const index =
+      codeBodies.push(decodeEntities(body).replace(/\s+/g, ' ').trim()) - 1;
+
+    return `${CODE_PLACEHOLDER_MARK}${index}${CODE_PLACEHOLDER_MARK}`;
   });
 
   const rendered = decodeEntities(
@@ -138,10 +159,12 @@ function renderCell(html: string): string {
     .replace(/\|/g, '\\|')
     .trim();
 
-  let nextCodeBody = 0;
-  return rendered.replaceAll(CODE_PLACEHOLDER, () => {
-    const body = codeBodies[nextCodeBody];
-    nextCodeBody += 1;
+  // A lookup, not a walk: each surviving token names its own index, so it
+  // resolves to its own body regardless of how many other tokens were
+  // deleted along with the tag or attribute that enclosed them.
+  return rendered.replace(CODE_PLACEHOLDER, (_match, indexText: string) => {
+    const body = codeBodies[Number(indexText)];
+
     return body === undefined ? '' : `\`${body.replace(/\|/g, '\\|')}\``;
   });
 }
