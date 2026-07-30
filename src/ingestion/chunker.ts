@@ -484,10 +484,26 @@ function splitAtSafeBoundaries(
     // not structure of its own. Read before either tracker consumes the
     // line, so the gate reflects the state coming into this line rather than
     // one tracker's own transition on it.
-    const mayOpenTable =
+    //
+    // The two gates diverge on one shape: a `<table>` line landing right
+    // after a markdown run's last row, with no blank line between them. That
+    // line is not itself a pipe row — MD_TABLE_ROW does not match it — so
+    // gating the HTML tracker on "a markdown table happens to be open"
+    // rather than "this line is markdown-table content" costs the only line
+    // TABLE_OPEN can ever match: past it, no later line reopens the chance,
+    // and the HTML table gets no protection at all. The markdown tracker
+    // needs no matching exception — every line it could open on already
+    // matches MD_TABLE_ROW, so "the other tracker is open" and "this line is
+    // the other tracker's content" coincide for it.
+    const isMdTableRow = MD_TABLE_ROW.test(line);
+    const mayOpenHtmlTable =
+      !fence.insideFence &&
+      !table.insideTable &&
+      !(mdTable.insideTable && isMdTableRow);
+    const mayOpenMdTable =
       !fence.insideFence && !table.insideTable && !mdTable.insideTable;
-    const opensTable = mayOpenTable && TABLE_OPEN.test(line);
-    const opensMdTable = mayOpenTable && MD_TABLE_ROW.test(line);
+    const opensTable = mayOpenHtmlTable && TABLE_OPEN.test(line);
+    const opensMdTable = mayOpenMdTable && isMdTableRow;
 
     // Flushing before the table opens, rather than after its first row, lets a
     // full buffer close cleanly and the table start a chunk of its own.
@@ -503,8 +519,8 @@ function splitAtSafeBoundaries(
     // everything that happens while it is open, or a fence nested inside an
     // unclosed table would hide its own size from the very check meant to
     // catch a table this large. Only the open transition stays gated.
-    const insideTable = table.consume(line, mayOpenTable);
-    const insideMdTable = mdTable.consume(line, mayOpenTable);
+    const insideTable = table.consume(line, mayOpenHtmlTable);
+    const insideMdTable = mdTable.consume(line, mayOpenMdTable);
 
     if (fenceMarker) {
       buffer.push(line);

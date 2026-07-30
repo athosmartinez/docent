@@ -914,4 +914,216 @@ describe('chunkMarkdown', () => {
     expect((chunks[0]?.content.match(/<table/gi) ?? []).length).toBe(1);
     expect((chunks[0]?.content.match(/<\/table>/gi) ?? []).length).toBe(1);
   });
+
+  it('opens the HTML tracker on a `<table>` line landing right after a markdown table, no blank line between', () => {
+    // mayOpenTable used to gate the HTML tracker on "a markdown table
+    // happens to be open" rather than "this line is markdown-table
+    // content". A `<table>` line arriving right after a pipe table's last
+    // row is not itself a pipe row, so gating on the former cost the only
+    // line TABLE_OPEN can ever match — the HTML tracker never opened and
+    // its table split on a bare `<tr>`/`<td>` with no protection at all.
+    const rows = Array.from(
+      { length: 30 },
+      (_v, i) =>
+        `  <tr><td>Row ${i} has enough prose in it to accumulate real tokens toward the target.</td></tr>`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '| A | B |',
+      '| --- | --- |',
+      '| a | 1 |',
+      '| b | 2 |',
+      '<table>',
+      ...rows,
+      '</table>',
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 60,
+      maxTokens: 100,
+      minTokens: 0,
+    });
+
+    for (const chunk of chunks) {
+      const opens = (chunk.content.match(/<table/gi) ?? []).length;
+      const closes = (chunk.content.match(/<\/table>/gi) ?? []).length;
+
+      expect(opens).toBe(closes);
+
+      const start = chunk.content.trimStart();
+
+      expect(start.startsWith('<tr')).toBe(false);
+      expect(start.startsWith('<td')).toBe(false);
+    }
+  });
+
+  it('still protects the HTML table when a blank line separates it from the markdown table ahead of it', () => {
+    // Guards against a fix that only handles the adjacent case: a blank
+    // line already closes the markdown tracker on its own before the
+    // `<table>` line arrives, so this shape must keep working exactly as it
+    // did before the adjacent-line fix was made.
+    const rows = Array.from(
+      { length: 30 },
+      (_v, i) =>
+        `  <tr><td>Row ${i} has enough prose in it to accumulate real tokens toward the target.</td></tr>`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '| A | B |',
+      '| --- | --- |',
+      '| a | 1 |',
+      '| b | 2 |',
+      '',
+      '<table>',
+      ...rows,
+      '</table>',
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 60,
+      maxTokens: 100,
+      minTokens: 0,
+    });
+
+    for (const chunk of chunks) {
+      const opens = (chunk.content.match(/<table/gi) ?? []).length;
+      const closes = (chunk.content.match(/<\/table>/gi) ?? []).length;
+
+      expect(opens).toBe(closes);
+
+      const start = chunk.content.trimStart();
+
+      expect(start.startsWith('<tr')).toBe(false);
+      expect(start.startsWith('<td')).toBe(false);
+    }
+  });
+
+  it('keeps both tables whole when a markdown table opens right after an HTML table closes, no blank line between', () => {
+    // The reverse adjacency of the two tests above. mayOpenMdTable already
+    // reads `!table.insideTable`, and the HTML tracker clears that flag
+    // while consuming its own `</table>` line — one line ahead of the `|`
+    // row that follows — so, unlike the HTML side, the markdown tracker
+    // never needed a same-line exception to open here.
+    const htmlRows = Array.from(
+      { length: 30 },
+      (_v, i) =>
+        `  <tr><td>Row ${i} has enough prose in it to accumulate real tokens toward the target.</td></tr>`,
+    );
+    const mdRows = Array.from(
+      { length: 20 },
+      (_v, i) =>
+        `| val${i} | Description number ${i} that runs a bit longer. |`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '<table>',
+      ...htmlRows,
+      '</table>',
+      '| A | B |',
+      '| --- | --- |',
+      ...mdRows,
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 60,
+      maxTokens: 100,
+      minTokens: 0,
+    });
+
+    const htmlChunks = chunks.filter((c) => /<table/i.test(c.content));
+    const mdChunks = chunks.filter((c) => c.content.includes('| A | B |'));
+
+    expect(htmlChunks).toHaveLength(1);
+    expect((htmlChunks[0]?.content.match(/<table/gi) ?? []).length).toBe(1);
+    expect((htmlChunks[0]?.content.match(/<\/table>/gi) ?? []).length).toBe(1);
+
+    expect(mdChunks).toHaveLength(1);
+    expect(mdChunks[0]?.content).toContain('| --- | --- |');
+    expect(mdChunks[0]?.content).toContain('val19');
+  });
+
+  it('keeps a fence and a markdown table each whole when the table opens right after the fence closes, no blank line between', () => {
+    const fenceLines = Array.from(
+      { length: 30 },
+      (_v, i) => `const v${i} = ${i};`,
+    );
+    const mdRows = Array.from(
+      { length: 20 },
+      (_v, i) =>
+        `| val${i} | Description number ${i} that runs a bit longer. |`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '```typescript',
+      ...fenceLines,
+      '```',
+      '| A | B |',
+      '| --- | --- |',
+      ...mdRows,
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 60,
+      maxTokens: 100,
+      minTokens: 0,
+    });
+
+    const fenceChunks = chunks.filter((c) => c.content.includes('```'));
+    const mdChunks = chunks.filter((c) => c.content.includes('| A | B |'));
+
+    expect(fenceChunks).toHaveLength(1);
+    expect((fenceChunks[0]?.content.match(/```/g) ?? []).length).toBe(2);
+
+    expect(mdChunks).toHaveLength(1);
+    expect(mdChunks[0]?.content).toContain('| --- | --- |');
+    expect(mdChunks[0]?.content).toContain('val19');
+  });
+
+  it('keeps a markdown table and a fence each whole when the fence opens right after the table ends, no blank line between', () => {
+    // A table open gets a pre-emptive "flush the buffer first" check
+    // (`opensTable || opensMdTable` above); a fence open does not, so a
+    // completed table already sitting in the buffer rides along into the
+    // same chunk as the fence that follows it rather than starting a fresh
+    // one. Neither region is split by that — this asserts exactly that:
+    // both stay intact, wherever they land.
+    const mdRows = Array.from(
+      { length: 20 },
+      (_v, i) =>
+        `| val${i} | Description number ${i} that runs a bit longer. |`,
+    );
+    const fenceLines = Array.from(
+      { length: 30 },
+      (_v, i) => `const v${i} = ${i};`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '| A | B |',
+      '| --- | --- |',
+      ...mdRows,
+      '```typescript',
+      ...fenceLines,
+      '```',
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 60,
+      maxTokens: 100,
+      minTokens: 0,
+    });
+
+    const mdChunks = chunks.filter((c) => c.content.includes('| A | B |'));
+    const fenceChunks = chunks.filter((c) => c.content.includes('```'));
+
+    expect(mdChunks).toHaveLength(1);
+    expect(mdChunks[0]?.content).toContain('| --- | --- |');
+    expect(mdChunks[0]?.content).toContain('val19');
+
+    expect(fenceChunks).toHaveLength(1);
+    expect((fenceChunks[0]?.content.match(/```/g) ?? []).length).toBe(2);
+  });
 });
