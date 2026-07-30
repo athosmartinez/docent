@@ -181,6 +181,67 @@ function createTableTracker() {
   };
 }
 
+// A markdown table row, per CommonMark's pipe-table syntax: a line whose
+// first non-whitespace character is `|`.
+const MD_TABLE_ROW = /^\s*\|/;
+
+/**
+ * Tracks whether a scan is inside a markdown ("pipe") table — a contiguous
+ * run of lines matching `MD_TABLE_ROW`. This is the table shape
+ * `convertHtmlTable` emits for a table that had a header row, and it is
+ * atomic for the same reason the HTML table it replaced was: a half
+ * beginning mid-table has no header and no separator to signal what it is,
+ * and chunks carry no overlap to recover it from.
+ *
+ * Unlike an HTML table, a pipe table has no open/close markup of its own —
+ * the run simply ends at the first line that is not one. That means it also
+ * has no way to signal it is "unclosed": a run that never ends is
+ * indistinguishable from a legitimately huge table from inside the tracker,
+ * so the same `UNCLOSED_TABLE_TOKEN_BOUND` escape the HTML tracker uses
+ * applies here too, bounding a pathological run of `|` lines the same way.
+ *
+ * `mayOpen` gates only the open transition, mirroring `createTableTracker`:
+ * the caller passes `false` while inside a fence or an already-open HTML
+ * table, so a `|`-prefixed line there is example content or table-cell text,
+ * not the start of a new atomic region. Two atomic regions have to be
+ * checked in combination, not only alone — a fence or an HTML table that
+ * failed to gate this tracker's open transition would let it start a
+ * conflicting region of its own inside one that is already open.
+ */
+function createMarkdownTableTracker() {
+  let insideTable = false;
+  let tokensSinceOpen = 0;
+
+  return {
+    get insideTable(): boolean {
+      return insideTable;
+    },
+    /** Feeds one line; returns whether it belongs to a markdown table. */
+    consume(line: string, mayOpen: boolean): boolean {
+      if (insideTable && tokensSinceOpen > UNCLOSED_TABLE_TOKEN_BOUND) {
+        insideTable = false;
+      }
+
+      const isRow = MD_TABLE_ROW.test(line);
+
+      if (!insideTable && mayOpen && isRow) {
+        insideTable = true;
+        tokensSinceOpen = 0;
+      } else if (insideTable && !isRow) {
+        insideTable = false;
+      }
+
+      const partOfTable = insideTable && isRow;
+
+      if (partOfTable) {
+        tokensSinceOpen += countTokens(line);
+      }
+
+      return partOfTable;
+    },
+  };
+}
+
 /**
  * Splits a document on its section headings. Boundaries follow the document's
  * own structure rather than a fixed window, which is why chunks carry no
@@ -405,6 +466,7 @@ function splitAtSafeBoundaries(
   let buffer: string[] = [];
   const fence = createFenceTracker();
   const table = createTableTracker();
+  const mdTable = createMarkdownTableTracker();
 
   const flush = (): void => {
     if (buffer.join('').trim().length > 0) {
@@ -417,15 +479,20 @@ function splitAtSafeBoundaries(
   for (const line of lines) {
     const fenceMarker = fence.consume(line);
 
-    // A table is only a table outside a fence; inside one it is an example of
-    // markup, not content.
-    const opensTable =
-      !fence.insideFence && !table.insideTable && TABLE_OPEN.test(line);
+    // Each kind of table may only open outside a fence and outside the
+    // other kind; inside either, its markup is an example or a cell's text,
+    // not structure of its own. Read before either tracker consumes the
+    // line, so the gate reflects the state coming into this line rather than
+    // one tracker's own transition on it.
+    const mayOpenTable =
+      !fence.insideFence && !table.insideTable && !mdTable.insideTable;
+    const opensTable = mayOpenTable && TABLE_OPEN.test(line);
+    const opensMdTable = mayOpenTable && MD_TABLE_ROW.test(line);
 
     // Flushing before the table opens, rather than after its first row, lets a
     // full buffer close cleanly and the table start a chunk of its own.
     if (
-      opensTable &&
+      (opensTable || opensMdTable) &&
       buffer.length > 0 &&
       countTokens(buffer.join('\n')) >= targetTokens
     ) {
@@ -435,17 +502,21 @@ function splitAtSafeBoundaries(
     // Fed on every line, fence content included: a table's bound has to see
     // everything that happens while it is open, or a fence nested inside an
     // unclosed table would hide its own size from the very check meant to
-    // catch a table this large. Only the open transition stays fence-gated.
-    const insideTable = table.consume(line, !fence.insideFence);
+    // catch a table this large. Only the open transition stays gated.
+    const insideTable = table.consume(line, mayOpenTable);
+    const insideMdTable = mdTable.consume(line, mayOpenTable);
 
     if (fenceMarker) {
       buffer.push(line);
       continue;
     }
 
-    if (!fence.insideFence && insideTable) {
+    if (!fence.insideFence && (insideTable || insideMdTable)) {
       // Never a safe place to break, for the same reason as a fence: a
-      // reference table split in half loses the half that has no header.
+      // reference table split in half loses the half that has no header —
+      // and a markdown pipe table, with no blank line anywhere inside it,
+      // has nothing else to stop the ceiling fallback below from cutting
+      // into it.
       buffer.push(line);
       continue;
     }

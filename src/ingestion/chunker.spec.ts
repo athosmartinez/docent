@@ -710,4 +710,208 @@ describe('chunkMarkdown', () => {
     }
     expect(rest[rest.length - 1]?.content).toContain('Paragraph 9');
   });
+
+  // A markdown pipe table is the shape convertHtmlTable emits for a table
+  // that had a header row. It carries no blank line anywhere inside it, so
+  // before this fix the only thing that could act on it was the ceiling
+  // fallback below — which has no table awareness — landing a cut on a bare
+  // row with no header and no separator, the same unrecoverable half the
+  // HTML table tracker exists to prevent.
+  it('keeps a real converted table whole at production defaults, with enough prose ahead to approach the ceiling', () => {
+    // content/techniques/validation.md's ValidationPipe options table,
+    // converted, plus a single unbroken paragraph of prose sized so the
+    // combined total lands just past the default 1200-token ceiling. The
+    // prose alone (601 tokens) stays under the 800-token target, so the
+    // paragraph-break flush never fires before the table starts — this is
+    // the exact shape the corpus reproduced the defect with, not a
+    // convenient one.
+    const table = [
+      '| Option | Type | Description |',
+      '| --- | --- | --- |',
+      '| `enableDebugMessages` | `boolean` | If set to true, validator will print extra warning messages to the console when something is not right. |',
+      '| `skipUndefinedProperties` | `boolean` | If set to true then validator will skip validation of all properties that are undefined in the validating object. |',
+      '| `skipNullProperties` | `boolean` | If set to true then validator will skip validation of all properties that are null in the validating object. |',
+      '| `skipMissingProperties` | `boolean` | If set to true then validator will skip validation of all properties that are null or undefined in the validating object. |',
+      '| `whitelist` | `boolean` | If set to true, validator will strip validated (returned) object of any properties that do not use any validation decorators. |',
+      '| `forbidNonWhitelisted` | `boolean` | If set to true, instead of stripping non-whitelisted properties validator will throw an exception. |',
+      '| `forbidUnknownValues` | `boolean` | If set to true, attempts to validate unknown objects fail immediately. |',
+      '| `disableErrorMessages` | `boolean` | If set to true, validation errors will not be returned to the client. |',
+      '| `errorHttpStatusCode` | `number` | This setting allows you to specify which exception type will be used in case of an error. By default it throws `BadRequestException`. |',
+      '| `exceptionFactory` | `Function` | Takes an array of the validation errors and returns an exception object to be thrown. |',
+      '| `groups` | `string[]` | Groups to be used during validation of the object. |',
+      '| `always` | `boolean` | Set default for `always` option of decorators. Default can be overridden in decorator options. |',
+      '| `strictGroups` | `boolean` | If `groups` is not given or is empty, ignore decorators with at least one group. |',
+      '| `dismissDefaultMessages` | `boolean` | If set to true, the validation will not use default messages. Error message always will be `undefined` if its not explicitly set. |',
+      '| `validationError.target` | `boolean` | Indicates if target should be exposed in `ValidationError`. |',
+      '| `validationError.value` | `boolean` | Indicates if validated value should be exposed in `ValidationError`. |',
+      '| `stopAtFirstError` | `boolean` | When set to true, validation of the given property will stop after encountering the first error. Defaults to false. |',
+      "| `errorFormat` | `'list' \\| 'grouped'` | Specifies the format of validation error messages. `'list'` (default) returns an array of error message strings. `'grouped'` returns an object with property paths as keys and arrays of unmodified error messages as values, preserving custom validation messages without prepending parent path prefixes. |",
+    ].join('\n');
+    const prose = `${'word '.repeat(600).trim()}.`;
+    const content = [
+      '### Validation',
+      '#### Using the built-in ValidationPipe',
+      prose,
+      '',
+      table,
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content);
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.content).toContain('| Option | Type | Description |');
+    expect(chunks[0]?.content).toContain('| --- | --- | --- |');
+    expect(chunks[0]?.content).toContain(
+      "`errorFormat` | `'list' \\| 'grouped'`",
+    );
+  });
+
+  it('emits a converted table whole even when it is larger than maxTokens, like an oversized fence', () => {
+    const rows = Array.from(
+      { length: 150 },
+      (_v, i) =>
+        `| \`option${i}\` | Description number ${i} that runs a little longer to add tokens. |`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '| Option | Description |',
+      '| --- | --- |',
+      ...rows,
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 100,
+      maxTokens: 300,
+      minTokens: 0,
+    });
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.tokenCount).toBeGreaterThan(300);
+    expect(chunks[0]?.content).toContain('| Option | Description |');
+    expect(chunks[0]?.content).toContain('| --- | --- |');
+    expect(chunks[0]?.content).toContain('option149');
+  });
+
+  it('still splits a definition list of 200 entries normally, proving it was not made atomic', () => {
+    // convertHtmlTable's headerless-table output — individually
+    // self-contained "- `key` — value" lines with no shared header or
+    // separator row to lose — is not the shape this fix protects.
+    const items = Array.from(
+      { length: 200 },
+      (_v, i) =>
+        `- \`option${i}\` — Description number ${i} that adds a bit of length to each entry.`,
+    );
+    const content = ['### Page', '#### Section', ...items].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 100,
+      maxTokens: 150,
+      minTokens: 0,
+    });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.tokenCount).toBeLessThanOrEqual(150);
+    }
+  });
+
+  it('does not treat a line beginning with `|` inside a fenced code block as a table row', () => {
+    const prose = Array.from(
+      { length: 10 },
+      (_v, i) => `Paragraph ${i} of prose after the fenced example.\n`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '```',
+      '| this looks like a table row |',
+      '| but is example text |',
+      '```',
+      ...prose,
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 20,
+      maxTokens: 50,
+      minTokens: 0,
+    });
+
+    // Normal paragraph-break chunking, not a table's much larger unclosed
+    // bound — proving the fenced pipe lines never opened a markdown table.
+    expect(chunks).toHaveLength(6);
+    for (const chunk of chunks) {
+      expect(chunk.tokenCount).toBeLessThanOrEqual(50);
+    }
+    expect(chunks[chunks.length - 1]?.content).toContain('Paragraph 9');
+  });
+
+  it('keeps a converted table intact between ordinary prose before and after it', () => {
+    const beforeProse = Array.from(
+      { length: 40 },
+      (_v, i) => `Paragraph ${i} of prose before the table.\n`,
+    );
+    const afterProse = Array.from(
+      { length: 40 },
+      (_v, i) => `Paragraph ${i} of prose after the table.\n`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      ...beforeProse,
+      '| A | B |',
+      '| --- | --- |',
+      '| a | 1 |',
+      '| b | 2 |',
+      '',
+      ...afterProse,
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 60,
+      maxTokens: 100,
+      minTokens: 0,
+    });
+
+    const withTable = chunks.filter((c) => c.content.includes('| A | B |'));
+
+    expect(withTable).toHaveLength(1);
+    expect(withTable[0]?.content).toContain('| --- | --- |');
+    expect(withTable[0]?.content).toContain('| a | 1 |');
+    expect(withTable[0]?.content).toContain('| b | 2 |');
+    for (const chunk of chunks) {
+      expect(chunk.tokenCount).toBeLessThanOrEqual(100);
+    }
+  });
+
+  it('keeps an HTML table whole even when one of its cells spans a line starting with `|`', () => {
+    // Two atomic regions can compose into a gap neither has alone: if a `|`
+    // line inside an already-open HTML table were allowed to also open a
+    // markdown table, the "flush before a table opens" check would treat it
+    // as a fresh boundary and split the still-open HTML table right there.
+    const rows = Array.from(
+      { length: 30 },
+      (_v, i) =>
+        `  <tr><td>Row ${i} has enough prose in it to accumulate real tokens toward the target.</td></tr>`,
+    );
+    const content = [
+      '### Page',
+      '#### Section',
+      '<table>',
+      ...rows,
+      '  | this pipe-looking line is inside an HTML table cell, not a markdown table row |',
+      ...rows,
+      '</table>',
+    ].join('\n');
+
+    const chunks = chunkMarkdown(content, {
+      targetTokens: 60,
+      maxTokens: 100,
+      minTokens: 0,
+    });
+
+    expect(chunks).toHaveLength(1);
+    expect((chunks[0]?.content.match(/<table/gi) ?? []).length).toBe(1);
+    expect((chunks[0]?.content.match(/<\/table>/gi) ?? []).length).toBe(1);
+  });
 });
