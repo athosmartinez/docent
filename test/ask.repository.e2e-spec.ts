@@ -14,6 +14,10 @@ describe('ask repository', () => {
   let repository: AskRepository;
   let sourceId: string;
   let chunkId: string;
+  // Populated only by tests whose transaction actually commits, so cleanup
+  // can delete exactly the queries this suite produced instead of the whole
+  // table — the rollback test commits nothing, and contributes no id here.
+  const createdAnswerIds: string[] = [];
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
@@ -52,7 +56,23 @@ describe('ask repository', () => {
 
   afterAll(async () => {
     await db.deleteFrom('sources').where('id', '=', sourceId).execute();
-    await db.deleteFrom('queries').execute();
+
+    // Scoped to the answers this suite actually created: an unqualified
+    // DELETE FROM queries would also remove any other suite's fixtures that
+    // happen to share the table when tests run with parallel workers.
+    if (createdAnswerIds.length > 0) {
+      const owned = await db
+        .selectFrom('answers')
+        .select('query_id')
+        .where('id', 'in', createdAnswerIds)
+        .execute();
+
+      const queryIds = owned.map((row) => row.query_id);
+      if (queryIds.length > 0) {
+        await db.deleteFrom('queries').where('id', 'in', queryIds).execute();
+      }
+    }
+
     await app.close();
   });
 
@@ -75,6 +95,8 @@ describe('ask repository', () => {
       ],
     });
 
+    createdAnswerIds.push(answerId);
+
     const citations = await db
       .selectFrom('citations')
       .selectAll()
@@ -83,6 +105,17 @@ describe('ask repository', () => {
 
     expect(citations).toHaveLength(1);
     expect(citations[0]?.chunk_id).toBe(chunkId);
+
+    const answer = await db
+      .selectFrom('answers')
+      .selectAll()
+      .where('id', '=', answerId)
+      .executeTakeFirstOrThrow();
+
+    expect(answer.grounded).toBe(true);
+    expect(answer.model).toBe('gpt-4.1-mini');
+    expect(answer.provider).toBe('openai');
+    expect(answer.finish_reason).toBe('stop');
   });
 
   it('records a refusal with no citations and a null answer', async () => {
@@ -95,6 +128,8 @@ describe('ask repository', () => {
       finishReason: null,
       citations: [],
     });
+
+    createdAnswerIds.push(answerId);
 
     const answer = await db
       .selectFrom('answers')
