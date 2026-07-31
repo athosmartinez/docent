@@ -44,11 +44,32 @@
         answerEl.className = '';
         sourcesEl.replaceChildren();
 
-        const response = await fetch('/ask/stream', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ question }),
-        });
+        let response;
+        try {
+          response = await fetch('/ask/stream', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ question }),
+          });
+        } catch {
+          // fetch() itself rejects only on a network failure — offline, DNS,
+          // a dropped connection — never on an HTTP error status.
+          showFailure('Could not reach the server.');
+          return;
+        }
+
+        if (!response.ok) {
+          // A validation error (400) or anything else non-2xx arrives as a
+          // JSON body, not an SSE stream — the frame parser below would find
+          // no "event:"/"data:" lines in it and silently show nothing.
+          const body = await response.json().catch(() => null);
+          showFailure(
+            Array.isArray(body?.message)
+              ? body.message.join(', ')
+              : (body?.message ?? `Request failed (${response.status}).`),
+          );
+          return;
+        }
 
         // The response is an SSE stream over POST, so EventSource (which is
         // GET-only) cannot read it; the body is parsed by hand.
@@ -72,6 +93,11 @@
         }
       });
 
+      function showFailure(message) {
+        answerEl.className = 'refusal';
+        answerEl.textContent = message;
+      }
+
       function handle(event, data) {
         if (event === 'citations') {
           for (const citation of data) {
@@ -83,12 +109,9 @@
         } else if (event === 'token') {
           answerEl.textContent += data;
         } else if (event === 'done' && !data.grounded) {
-          answerEl.className = 'refusal';
-          answerEl.textContent =
-            'Nothing in the ingested documentation answers that.';
+          showFailure('Nothing in the ingested documentation answers that.');
         } else if (event === 'error') {
-          answerEl.className = 'refusal';
-          answerEl.textContent = `Something went wrong: ${data}`;
+          showFailure(`Something went wrong: ${data}`);
         }
       }
     </script>

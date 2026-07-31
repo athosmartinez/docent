@@ -3,6 +3,7 @@ import type { INestApplication } from '@nestjs/common';
 import { Kysely, sql } from 'kysely';
 import request from 'supertest';
 import type { Server } from 'node:http';
+import { Readable } from 'node:stream';
 
 import { AppModule } from '../src/app.module';
 import { KYSELY } from '../src/common/database/database.module';
@@ -39,20 +40,16 @@ const stubLlm: LlmProvider = {
       provider: 'stub',
       finishReason: 'stop',
     }),
-  // The interface returns AsyncIterable<string>, which only an async
-  // generator satisfies structurally — a sync one would not — even though
-  // this stub yields fixed tokens with no async work of its own.
-  // eslint-disable-next-line @typescript-eslint/require-await
-  stream: async function* () {
-    yield 'Use the ';
-    yield 'marker option [1].';
-  },
+  // A Readable is an AsyncIterable<string> — for await consumes it exactly
+  // like a generator — without an async function that has no await in it.
+  stream: () => Readable.from(['Use the ', 'marker option [1].']),
 };
 
 describe('ask', () => {
   let app: INestApplication<Server>;
   let db: Kysely<DB>;
   let sourceId: string;
+  let markerChunkId: string;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
@@ -85,13 +82,15 @@ describe('ask', () => {
       (_v, i) => i / 10000,
     );
 
-    await sql`
+    const chunk = await sql<{ id: string }>`
       INSERT INTO chunks (document_id, ordinal, content, heading_path, token_count, embedding)
       VALUES (${document.id}, 0,
               'The unmistakablemarker option enables strict validation.',
               ARRAY['Marker'], 8,
               ${`[${vector.join(',')}]`}::vector)
+      RETURNING id
     `.execute(db);
+    markerChunkId = chunk.rows[0]!.id;
   });
 
   afterAll(async () => {
@@ -133,18 +132,35 @@ describe('ask', () => {
   });
 
   it('persists the question and its citations', async () => {
+    // Distinct question text, so the filter below can require an exact
+    // match on this test's own row instead of "some citation row exists
+    // somewhere" — an unscoped read would pass on any leftover citation from
+    // a crashed run, a concurrently-running suite (ask.repository.e2e-spec.ts
+    // also inserts citations), or a manual run against the same database.
+    // "the" is the only other word: this corpus is a real, ingested
+    // documentation set alongside the fixture, and any other real word here
+    // would compete against "unmistakablemarker" for ranking the way it does
+    // not need to in the question the earlier test asks.
+    const question = 'what does the unmistakablemarker do?';
+
     await request(app.getHttpServer())
       .post('/ask')
-      .send({ question: 'what does unmistakablemarker do?' })
+      .send({ question })
       .expect(200);
 
     const rows = await db
       .selectFrom('citations')
       .innerJoin('answers', 'answers.id', 'citations.answer_id')
-      .select(['citations.ordinal'])
+      .innerJoin('queries', 'queries.id', 'answers.query_id')
+      .select(['citations.ordinal', 'citations.chunk_id'])
+      .where('queries.question', '=', question)
+      .orderBy('citations.ordinal')
       .execute();
 
-    expect(rows.length).toBeGreaterThan(0);
+    // The top-ranked citation is the fixture chunk itself, not merely any
+    // row — the real corpus this suite runs alongside contributes lower-
+    // ranked citations of its own once the answer is grounded.
+    expect(rows[0]).toEqual({ ordinal: 1, chunk_id: markerChunkId });
   });
 
   it('streams citations before the first token', async () => {
@@ -160,6 +176,93 @@ describe('ask', () => {
     expect(citationsAt).toBeGreaterThanOrEqual(0);
     expect(tokenAt).toBeGreaterThan(citationsAt);
     expect(response.text).toContain('event: done');
+  });
+
+  it('refuses over SSE without calling the model, when the score floor is not cleared', async () => {
+    let streamCalls = 0;
+    const countingLlm: LlmProvider = {
+      complete: (request: CompletionRequest) => stubLlm.complete(request),
+      stream: (request: CompletionRequest) => {
+        streamCalls += 1;
+        return stubLlm.stream(request);
+      },
+    };
+
+    // No fused score can ever clear an infinite floor, so retrieval reports
+    // ungrounded regardless of what the corpus contains.
+    const ungrounded = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(EMBEDDINGS)
+      .useValue(stubEmbeddings)
+      .overrideProvider(LLM)
+      .useValue(countingLlm)
+      .overrideProvider('GROUNDING_FLOOR')
+      .useValue(Number.POSITIVE_INFINITY)
+      .compile();
+
+    const ungroundedApp =
+      ungrounded.createNestApplication<INestApplication<Server>>();
+    await ungroundedApp.init();
+
+    try {
+      const response = await request(ungroundedApp.getHttpServer())
+        .post('/ask/stream')
+        .send({ question: 'what does unmistakablemarker do?' })
+        .expect(200)
+        .expect('content-type', /text\/event-stream/);
+
+      expect(response.text).toBe(
+        'event: citations\ndata: []\n\nevent: done\ndata: {"grounded":false}\n\n',
+      );
+      expect(response.text).not.toContain('event: token');
+      expect(streamCalls).toBe(0);
+    } finally {
+      await ungroundedApp.close();
+    }
+  });
+
+  it('reports a mid-stream failure as an SSE event, not a status code', async () => {
+    // Throws after its first yield, so the failure lands after citations and
+    // at least one token have already gone out on the wire — the case where
+    // a status code is no longer possible because the response line and
+    // headers are already sent.
+    function* explodingTokens(): Generator<string> {
+      yield 'Use the ';
+      throw new Error('stream exploded mid-flight');
+    }
+
+    const failing = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(EMBEDDINGS)
+      .useValue(stubEmbeddings)
+      .overrideProvider(LLM)
+      .useValue({
+        complete: (request: CompletionRequest) => stubLlm.complete(request),
+        stream: () => Readable.from(explodingTokens()),
+      })
+      .compile();
+
+    const failingApp =
+      failing.createNestApplication<INestApplication<Server>>();
+    await failingApp.init();
+
+    try {
+      const response = await request(failingApp.getHttpServer())
+        .post('/ask/stream')
+        .send({ question: 'what does unmistakablemarker do?' })
+        .expect(200)
+        .expect('content-type', /text\/event-stream/);
+
+      const citationsAt = response.text.indexOf('event: citations');
+      const tokenAt = response.text.indexOf('event: token');
+      const errorAt = response.text.indexOf('event: error');
+
+      expect(citationsAt).toBeGreaterThanOrEqual(0);
+      expect(tokenAt).toBeGreaterThan(citationsAt);
+      expect(errorAt).toBeGreaterThan(tokenAt);
+      expect(response.text).toContain('stream exploded mid-flight');
+      expect(response.text).not.toContain('event: done');
+    } finally {
+      await failingApp.close();
+    }
   });
 
   it('serves the chat page at the root', async () => {
