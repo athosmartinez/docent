@@ -23,6 +23,9 @@ export const envSchema = z
     ANSWER_MODEL: z.string().min(1).default('gpt-4.1-mini'),
     ANSWER_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
     EMBEDDING_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+    // Provisional. Calibrated against in-corpus and out-of-corpus questions
+    // once the pipeline runs; see the plan's calibration task.
+    GROUNDING_FLOOR: z.coerce.number().nonnegative().default(0.02),
   })
   .refine((env) => env.EMBEDDING_DIMENSIONS === CHUNK_EMBEDDING_DIMENSIONS, {
     message: `must be ${CHUNK_EMBEDDING_DIMENSIONS}, the dimensionality the chunks column declares`,
