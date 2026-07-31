@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>docent</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font: 16px/1.6 ui-sans-serif, system-ui, sans-serif;
+        max-width: 46rem; margin: 0 auto; padding: 2rem 1rem;
+      }
+      h1 { font-size: 1.25rem; }
+      form { display: flex; gap: .5rem; }
+      input { flex: 1; padding: .6rem; font: inherit; }
+      button { padding: .6rem 1rem; font: inherit; cursor: pointer; }
+      #answer { white-space: pre-wrap; margin-top: 1.5rem; }
+      #sources { margin-top: 1.5rem; font-size: .9rem; opacity: .85; }
+      #sources li { margin-bottom: .35rem; }
+      .refusal { font-style: italic; }
+    </style>
+  </head>
+  <body>
+    <h1>docent</h1>
+    <form id="form">
+      <input id="question" placeholder="Ask about the documentation…" autofocus />
+      <button type="submit">Ask</button>
+    </form>
+    <div id="answer"></div>
+    <ol id="sources"></ol>
+
+    <script>
+      const form = document.getElementById('form');
+      const questionInput = document.getElementById('question');
+      const answerEl = document.getElementById('answer');
+      const sourcesEl = document.getElementById('sources');
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const question = questionInput.value.trim();
+        if (!question) return;
+
+        answerEl.textContent = '';
+        answerEl.className = '';
+        sourcesEl.replaceChildren();
+
+        const response = await fetch('/ask/stream', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ question }),
+        });
+
+        // The response is an SSE stream over POST, so EventSource (which is
+        // GET-only) cannot read it; the body is parsed by hand.
+        const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+        let buffer = '';
+
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += value;
+
+          const frames = buffer.split('\n\n');
+          buffer = frames.pop() ?? '';
+
+          for (const frame of frames) {
+            const event = frame.match(/^event: (.*)$/m)?.[1];
+            const raw = frame.match(/^data: (.*)$/m)?.[1];
+            if (!event || raw === undefined) continue;
+            handle(event, JSON.parse(raw));
+          }
+        }
+      });
+
+      function handle(event, data) {
+        if (event === 'citations') {
+          for (const citation of data) {
+            const li = document.createElement('li');
+            const heading = citation.headingPath.join(' › ');
+            li.textContent = heading ? `${citation.path} — ${heading}` : citation.path;
+            sourcesEl.append(li);
+          }
+        } else if (event === 'token') {
+          answerEl.textContent += data;
+        } else if (event === 'done' && !data.grounded) {
+          answerEl.className = 'refusal';
+          answerEl.textContent =
+            'Nothing in the ingested documentation answers that.';
+        } else if (event === 'error') {
+          answerEl.className = 'refusal';
+          answerEl.textContent = `Something went wrong: ${data}`;
+        }
+      }
+    </script>
+  </body>
+</html>
