@@ -6,7 +6,7 @@ import {
 } from '../embeddings/embeddings.types';
 import { fuseByRrf } from './rrf';
 import { RetrievalRepository } from './retrieval.repository';
-import type { RetrievedChunk } from './retrieval.types';
+import type { RetrievalResult } from './retrieval.types';
 
 @Injectable()
 export class RetrievalService {
@@ -19,7 +19,7 @@ export class RetrievalService {
     @Inject('RRF_K') private readonly rrfK: number,
   ) {}
 
-  async search(question: string): Promise<RetrievedChunk[]> {
+  async search(question: string): Promise<RetrievalResult> {
     const [embedding] = await this.embeddings.embed([question]);
 
     if (!embedding) {
@@ -33,6 +33,9 @@ export class RetrievalService {
       this.repository.searchByText(question, this.topN),
     ]);
 
-    return fuseByRrf([byVector, byText], this.rrfK).slice(0, this.topK);
+    return {
+      chunks: fuseByRrf([byVector, byText], this.rrfK).slice(0, this.topK),
+      bestDistance: byVector[0]?.distance ?? null,
+    };
   }
 }

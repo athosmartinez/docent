@@ -4,7 +4,7 @@ import { Kysely, sql } from 'kysely';
 import { KYSELY } from '../common/database/database.module';
 import type { DB } from '../common/database/schema';
 import { toVectorLiteral } from '../common/database/vector';
-import type { RankedChunk } from './retrieval.types';
+import type { RankedChunk, VectorRankedChunk } from './retrieval.types';
 
 interface Row {
   chunk_id: string;
@@ -13,11 +13,20 @@ interface Row {
   content: string;
 }
 
+interface VectorRow extends Row {
+  distance: number;
+}
+
 const toRanked = (row: Row): RankedChunk => ({
   chunkId: row.chunk_id,
   documentPath: row.document_path,
   headingPath: row.heading_path,
   content: row.content,
+});
+
+const toVectorRanked = (row: VectorRow): VectorRankedChunk => ({
+  ...toRanked(row),
+  distance: row.distance,
 });
 
 @Injectable()
@@ -34,12 +43,13 @@ export class RetrievalRepository {
   async searchByVector(
     embedding: number[],
     limit: number,
-  ): Promise<RankedChunk[]> {
+  ): Promise<VectorRankedChunk[]> {
     const literal = toVectorLiteral(embedding);
 
-    const result = await sql<Row>`
+    const result = await sql<VectorRow>`
       SELECT c.id AS chunk_id, d.path AS document_path,
-             c.heading_path, c.content
+             c.heading_path, c.content,
+             c.embedding::halfvec(3072) <=> ${literal}::halfvec(3072) AS distance
       FROM chunks c
       JOIN documents d ON d.id = c.document_id
       JOIN sources   s ON s.id = d.source_id
@@ -48,7 +58,7 @@ export class RetrievalRepository {
       LIMIT ${limit}
     `.execute(this.db);
 
-    return result.rows.map(toRanked);
+    return result.rows.map(toVectorRanked);
   }
 
   /**

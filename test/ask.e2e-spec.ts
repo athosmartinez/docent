@@ -178,7 +178,7 @@ describe('ask', () => {
     expect(response.text).toContain('event: done');
   });
 
-  it('refuses over SSE without calling the model, when the score floor is not cleared', async () => {
+  it('refuses over SSE without calling the model, when nothing is within the distance threshold', async () => {
     let streamCalls = 0;
     const countingLlm: LlmProvider = {
       complete: (request: CompletionRequest) => stubLlm.complete(request),
@@ -188,15 +188,15 @@ describe('ask', () => {
       },
     };
 
-    // No fused score can ever clear an infinite floor, so retrieval reports
-    // ungrounded regardless of what the corpus contains.
+    // No finite distance can ever clear a threshold of negative infinity, so
+    // retrieval reports ungrounded regardless of what the corpus contains.
     const ungrounded = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(EMBEDDINGS)
       .useValue(stubEmbeddings)
       .overrideProvider(LLM)
       .useValue(countingLlm)
-      .overrideProvider('GROUNDING_FLOOR')
-      .useValue(Number.POSITIVE_INFINITY)
+      .overrideProvider('GROUNDING_MAX_DISTANCE')
+      .useValue(Number.NEGATIVE_INFINITY)
       .compile();
 
     const ungroundedApp =

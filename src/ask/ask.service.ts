@@ -16,20 +16,21 @@ export class AskService {
     @Inject(RetrievalService) private readonly retrieval: RetrievalService,
     @Inject(LLM) private readonly llm: LlmProvider,
     @Inject(AskRepository) private readonly repository: AskRepository,
-    @Inject('GROUNDING_FLOOR') private readonly floor: number,
+    @Inject('GROUNDING_MAX_DISTANCE') private readonly maxDistance: number,
   ) {}
 
   /**
    * Retrieval decides whether an answer is possible, before any token is
-   * spent. A score below the floor means no LLM call at all — a model asked
-   * to rate its own grounding reports high confidence on hallucinations, so
-   * the signal has to come from outside it.
+   * spent. A nearest chunk further than the threshold means no LLM call at
+   * all — a model asked to rate its own grounding reports high confidence on
+   * hallucinations, so the signal has to come from outside it. Distance is a
+   * cost, not a score, so the comparison is against an upper bound: the
+   * question is grounded when the nearest chunk is *within* the threshold.
    */
   async retrieveGrounded(question: string): Promise<RetrievedChunk[] | null> {
-    const chunks = await this.retrieval.search(question);
-    const best = chunks[0];
+    const { chunks, bestDistance } = await this.retrieval.search(question);
 
-    if (!best || best.score < this.floor) {
+    if (bestDistance === null || bestDistance > this.maxDistance) {
       return null;
     }
 

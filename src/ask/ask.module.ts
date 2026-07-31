@@ -14,10 +14,10 @@ import { AskService } from './ask.service';
     AskRepository,
     AskService,
     {
-      provide: 'GROUNDING_FLOOR',
+      provide: 'GROUNDING_MAX_DISTANCE',
       inject: [ConfigService],
       useFactory: (config: ConfigService<Env, true>): number =>
-        config.get('GROUNDING_FLOOR', { infer: true }),
+        config.get('GROUNDING_MAX_DISTANCE', { infer: true }),
     },
   ],
   exports: [AskRepository, AskService],

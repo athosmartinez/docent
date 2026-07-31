@@ -29,30 +29,30 @@ async function main(): Promise<void> {
   const retrieval = app.get(RetrievalService);
 
   const measure = async (label: string, questions: string[]) => {
-    const scores: number[] = [];
+    const distances: number[] = [];
 
     for (const question of questions) {
-      const results = await retrieval.search(question);
-      const best = results[0]?.score ?? 0;
-      scores.push(best);
-      console.log(`${label}\t${best.toFixed(5)}\t${question}`);
+      const { bestDistance } = await retrieval.search(question);
+      const distance = bestDistance ?? Number.POSITIVE_INFINITY;
+      distances.push(distance);
+      console.log(`${label}\t${distance.toFixed(5)}\t${question}`);
     }
 
-    return scores;
+    return distances;
   };
 
   const inside = await measure('IN ', IN_CORPUS);
   const outside = await measure('OUT', OUT_OF_CORPUS);
 
-  const lowestInside = Math.min(...inside);
-  const highestOutside = Math.max(...outside);
+  const highestInside = Math.max(...inside);
+  const lowestOutside = Math.min(...outside);
 
-  console.log(`\nlowest in-corpus:   ${lowestInside.toFixed(5)}`);
-  console.log(`highest out-corpus: ${highestOutside.toFixed(5)}`);
+  console.log(`\nhighest in-corpus:  ${highestInside.toFixed(5)}`);
+  console.log(`lowest out-corpus:  ${lowestOutside.toFixed(5)}`);
   console.log(
-    lowestInside > highestOutside
-      ? `separated — a floor anywhere in (${highestOutside.toFixed(5)}, ${lowestInside.toFixed(5)}] works; take the midpoint`
-      : 'OVERLAP — the two populations are not separable by score alone; record this and keep the floor permissive',
+    highestInside < lowestOutside
+      ? `separated — a threshold anywhere in [${highestInside.toFixed(5)}, ${lowestOutside.toFixed(5)}) works; take the midpoint`
+      : 'OVERLAP — the two populations are not separable by distance alone; record this and stop before choosing a threshold',
   );
 
   await app.close();
