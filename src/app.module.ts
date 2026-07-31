@@ -6,6 +6,7 @@ import { RedisModule } from './common/redis/redis.module';
 import { EmbeddingsModule } from './embeddings/embeddings.module';
 import { HealthModule } from './health/health.module';
 import { IngestionModule } from './ingestion/ingestion.module';
+import { LlmModule } from './llm/llm.module';
 import { RetrievalModule } from './retrieval/retrieval.module';
 
 @Module({
@@ -16,6 +17,7 @@ import { RetrievalModule } from './retrieval/retrieval.module';
     EmbeddingsModule,
     HealthModule,
     IngestionModule,
+    LlmModule,
     RetrievalModule,
   ],
 })
