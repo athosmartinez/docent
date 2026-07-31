@@ -71,6 +71,43 @@ export class AskService {
   }
 
   /**
+   * The streaming path cannot reuse `ask`: the text only exists once the last
+   * delta has been sent. Recording it afterwards keeps a streamed answer in
+   * the same tables as a non-streamed one, which is what lets the evaluation
+   * suite read both back the same way.
+   */
+  async recordStreamed(
+    question: string,
+    chunks: RetrievedChunk[],
+    text: string,
+    model: string | null,
+    provider: string | null,
+    finishReason: string | null,
+  ): Promise<void> {
+    await this.persist({
+      question,
+      answer: text,
+      grounded: true,
+      model,
+      provider,
+      finishReason,
+      citations: toCitations(chunks),
+    });
+  }
+
+  async recordRefusal(question: string): Promise<void> {
+    await this.persist({
+      question,
+      answer: null,
+      grounded: false,
+      model: null,
+      provider: null,
+      finishReason: null,
+      citations: [],
+    });
+  }
+
+  /**
    * Persistence failures are logged, never propagated: by the time this runs
    * the answer has been produced and, on the streaming path, already sent.
    */

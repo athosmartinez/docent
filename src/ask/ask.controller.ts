@@ -77,6 +77,7 @@ export class AskController {
       if (!chunks) {
         sse(res, 'citations', []);
         sse(res, 'done', { grounded: false });
+        await this.service.recordRefusal(question);
         res.end();
         return;
       }
@@ -86,13 +87,28 @@ export class AskController {
       // still being written.
       sse(res, 'citations', toCitations(chunks));
 
+      let answer = '';
+
       for await (const delta of this.llm.stream(
         buildPrompt(question, chunks),
       )) {
+        answer += delta;
         sse(res, 'token', delta);
       }
 
       sse(res, 'done', { grounded: true });
+      // model/provider are recorded null here: the streaming API reports them
+      // per chunk rather than once, and threading them through is work M3
+      // redoes once a router names the provider that actually served the
+      // request.
+      await this.service.recordStreamed(
+        question,
+        chunks,
+        answer,
+        null,
+        null,
+        'stop',
+      );
     } catch (error: unknown) {
       // The status line is long gone by now, so a failure can only be
       // reported inside the stream itself.

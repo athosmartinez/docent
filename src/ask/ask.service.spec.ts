@@ -160,3 +160,47 @@ describe('AskService', () => {
     expect(complete).not.toHaveBeenCalled();
   });
 });
+
+describe('AskService.recordStreamed', () => {
+  it('records a streamed answer with its citations', async () => {
+    const { service, record } = build({
+      chunks: [chunk('a')],
+      bestDistance: 0.3,
+    });
+
+    await service.recordStreamed(
+      'how?',
+      [chunk('a')],
+      'the streamed answer [1]',
+      'gpt-4.1-mini',
+      'openai',
+      'stop',
+    );
+
+    expect(record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        question: 'how?',
+        answer: 'the streamed answer [1]',
+        grounded: true,
+      }),
+    );
+  });
+
+  it('does not throw when persistence fails', async () => {
+    const repository = {
+      record: jest.fn().mockRejectedValue(new Error('down')),
+    } as unknown as AskRepository;
+
+    const llm: LlmProvider = { complete: jest.fn(), stream: jest.fn() };
+    const service = new AskService(
+      { search: jest.fn() } as unknown as RetrievalService,
+      llm,
+      repository,
+      0.5,
+    );
+
+    await expect(
+      service.recordStreamed('q', [chunk('a')], 'text', 'm', 'openai', 'stop'),
+    ).resolves.toBeUndefined();
+  });
+});

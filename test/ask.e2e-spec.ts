@@ -300,4 +300,37 @@ describe('ask', () => {
       await failingApp.close();
     }
   });
+
+  it('persists an answer that was streamed, with its citations', async () => {
+    // Distinct from every other question this file sends over /ask/stream or
+    // /ask — capitalised, otherwise identical. Several earlier tests already
+    // reuse 'what does unmistakablemarker do?' verbatim (one of them over the
+    // JSON endpoint, which has always recorded), so filtering by substring
+    // would let this test pass on a row a different endpoint wrote, whether
+    // or not the streaming path records anything at all. Case does not
+    // change tsvector lexemes or the stub embedding (a function of string
+    // length only), so this ranks identically to the phrasing already proven
+    // not to dilute below the grounding threshold against the real,
+    // non-hermetic corpus.
+    const question = 'What does unmistakablemarker do?';
+
+    await request(app.getHttpServer())
+      .post('/ask/stream')
+      .send({ question })
+      .expect(200);
+
+    const rows = await db
+      .selectFrom('citations')
+      .innerJoin('answers', 'answers.id', 'citations.answer_id')
+      .innerJoin('queries', 'queries.id', 'answers.query_id')
+      .select(['citations.ordinal', 'answers.answer', 'answers.grounded'])
+      .where('queries.question', '=', question)
+      .orderBy('citations.ordinal')
+      .execute();
+
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows[0]?.ordinal).toBe(1);
+    expect(rows[0]?.grounded).toBe(true);
+    expect(rows[0]?.answer).toContain('marker option');
+  });
 });
