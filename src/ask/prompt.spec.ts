@@ -32,13 +32,19 @@ describe('toCitations', () => {
 
 describe('buildPrompt', () => {
   it('numbers the sources the same way toCitations does', () => {
-    const chunks = [chunk('a', 0.9), chunk('b', 0.8)];
+    // Retrieval order (a, b) is deliberately the reverse of score order
+    // (b's score is higher). If either function quietly re-derived its
+    // numbering from score instead of array order, the two would disagree
+    // here — with same-order scores that drift would be invisible.
+    const chunks = [chunk('a', 0.3), chunk('b', 0.9)];
     const { user } = buildPrompt('how?', chunks);
     const citations = toCitations(chunks);
 
-    // The contract that makes a citation resolvable: source [2] in the
-    // prompt and citations[1] must be the same chunk.
+    // The contract that makes a citation resolvable: source [N] in the
+    // prompt and citations[N-1] must be the same chunk, at both ends.
+    expect(user).toContain('[1] content/a.md');
     expect(user).toContain('[2] content/b.md');
+    expect(citations[0]?.chunkId).toBe('a');
     expect(citations[1]?.chunkId).toBe('b');
   });
 
@@ -52,6 +58,14 @@ describe('buildPrompt', () => {
     const { user } = buildPrompt('how?', [chunk('a', 0.9)]);
 
     expect(user).toContain('Techniques > a');
+  });
+
+  it('omits the separator when a chunk has no heading path', () => {
+    const rootChunk: RetrievedChunk = { ...chunk('a', 0.9), headingPath: [] };
+    const { user } = buildPrompt('how?', [rootChunk]);
+
+    expect(user).toContain('[1] content/a.md\nbody of a');
+    expect(user).not.toContain('—');
   });
 
   it('includes the question', () => {
