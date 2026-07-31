@@ -69,17 +69,21 @@ describe('OpenAiLlmProvider', () => {
   });
 
   it('yields the text deltas of a stream in order', async () => {
-    // Async only to match the shape of the SDK's stream response, which the
-    // provider consumes with `for await`; the fake never actually awaits.
-    // eslint-disable-next-line @typescript-eslint/require-await
-    async function* chunks() {
+    // A sync generator is enough: `for await` in the provider consumes sync
+    // and async iterables identically, so this fake need not be async too.
+    // The leading empty-content chunk mirrors a real stream, whose first
+    // chunk is role-only — it must be skipped, not mistaken for the stream's
+    // end, so content arriving after it is still received.
+    function* chunks() {
+      yield { choices: [{ delta: {} }] };
       yield { choices: [{ delta: { content: 'he' } }] };
       yield { choices: [{ delta: { content: 'llo' } }] };
       yield { choices: [{ delta: {} }] };
     }
 
+    const create = jest.fn().mockResolvedValue(chunks());
     const client = {
-      chat: { completions: { create: jest.fn().mockResolvedValue(chunks()) } },
+      chat: { completions: { create } },
     } as unknown as OpenAI;
 
     const received: string[] = [];
@@ -91,5 +95,8 @@ describe('OpenAiLlmProvider', () => {
     }
 
     expect(received).toEqual(['he', 'llo']);
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ stream: true }),
+    );
   });
 });
