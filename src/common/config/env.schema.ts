@@ -17,6 +17,9 @@ export const envSchema = z
       .int()
       .positive()
       .default(CHUNK_EMBEDDING_DIMENSIONS),
+    RETRIEVAL_TOP_N: z.coerce.number().int().positive().default(20),
+    RETRIEVAL_TOP_K: z.coerce.number().int().positive().default(8),
+    RRF_K: z.coerce.number().int().positive().default(60),
   })
   .refine((env) => env.EMBEDDING_DIMENSIONS === CHUNK_EMBEDDING_DIMENSIONS, {
     message: `must be ${CHUNK_EMBEDDING_DIMENSIONS}, the dimensionality the chunks column declares`,
