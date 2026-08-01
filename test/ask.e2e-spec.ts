@@ -333,4 +333,66 @@ describe('ask', () => {
     expect(rows[0]?.grounded).toBe(true);
     expect(rows[0]?.answer).toContain('marker option');
   });
+
+  it('persists a refusal that was streamed, with no citations', async () => {
+    // Distinct from every question above — same stopwords-plus-lexeme shape
+    // ('what', 'is', 'for' are all Postgres default-English stopwords, same
+    // as 'does'/'do'/'the' in the other phrasings — so this dilutes ranking
+    // no differently than the others, which is moot here regardless, since
+    // the threshold override below forces a refusal independent of score.
+    const question = 'What is unmistakablemarker for?';
+
+    // Forces the refusal the same way the existing SSE-refusal test does:
+    // by overriding the GROUNDING_MAX_DISTANCE provider token to a value no
+    // finite distance can clear, not by picking a question that happens to
+    // score badly — which would break the moment the corpus or the floor
+    // moved.
+    const ungrounded = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(EMBEDDINGS)
+      .useValue(stubEmbeddings)
+      .overrideProvider(LLM)
+      .useValue(stubLlm)
+      .overrideProvider('GROUNDING_MAX_DISTANCE')
+      .useValue(Number.NEGATIVE_INFINITY)
+      .compile();
+
+    const ungroundedApp =
+      ungrounded.createNestApplication<INestApplication<Server>>();
+    await ungroundedApp.init();
+
+    try {
+      await request(ungroundedApp.getHttpServer())
+        .post('/ask/stream')
+        .send({ question })
+        .expect(200);
+
+      const rows = await db
+        .selectFrom('answers')
+        .innerJoin('queries', 'queries.id', 'answers.query_id')
+        .select(['answers.id', 'answers.answer', 'answers.grounded'])
+        .where('queries.question', '=', question)
+        .execute();
+
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows[0]?.grounded).toBe(false);
+      expect(rows[0]?.answer).toBeNull();
+
+      // Scoped to exactly the answer row(s) this test created, not a bare
+      // count of the whole table — an unscoped read would stay green even if
+      // some other suite's citations happened to exist.
+      const citations = await db
+        .selectFrom('citations')
+        .selectAll()
+        .where(
+          'answer_id',
+          'in',
+          rows.map((row) => row.id),
+        )
+        .execute();
+
+      expect(citations).toHaveLength(0);
+    } finally {
+      await ungroundedApp.close();
+    }
+  });
 });
