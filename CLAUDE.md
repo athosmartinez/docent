@@ -6,12 +6,15 @@ Guidance for AI agents (and humans) working in this repository.
 
 `docent` is an **agentic RAG service** over docs/codebases, in **TypeScript / Nest.js**, with multi-provider LLM routing + fallback, cost tracking, an evaluation suite, and a native **MCP** server. See `README.md` for the public overview.
 
-## Current status — M1 complete
+## Current status — M2 complete
 
-The service ingests a documentation repository into embedded, indexed chunks:
-`POST /ingest` and `npm run ingest` both drive the same pipeline. There is no
-retrieval or answering yet — the `content_tsv` column and the vector index exist but
-nothing queries them. **Next milestone: M2** (core RAG) — see `_planning/03-roadmap.md`.
+The service ingests a documentation repository into embedded, indexed chunks and now
+answers questions about it with inline citations: `POST /ask` and `POST /ask/stream`
+(SSE) both drive `retrieval`, which queries the vector index and `content_tsv` and
+fuses the two rankings by Reciprocal Rank Fusion. A question with no chunk close
+enough to it is refused before the LLM is ever called. A minimal chat page at `/`
+drives both endpoints. **Next milestone: M3** (production engine) — see
+`_planning/03-roadmap.md`.
 
 ## The plan lives in `_planning/` (read it first)
 
@@ -45,10 +48,13 @@ the flags that will bite you first on the wrong runtime.
 
 Modules under `src/` today: **`common`** (config, database, redis, shared helpers),
 **`health`**, **`ingestion`** (source fetching, markdown cleaning, chunking, and the
-repository that writes documents/chunks) and **`embeddings`** (the OpenAI embeddings
-provider). The rest — `retrieval · agent · llm · cost · mcp · eval · api` — are the
-target structure from `_planning/02-architecture.md`; each is created by the milestone
-that gives it content, not before.
+repository that writes documents/chunks), **`embeddings`** (the OpenAI embeddings
+provider), **`retrieval`** (the vector + lexical queries and their RRF fusion),
+**`llm`** (the completion provider used to answer a question) and **`ask`** (grounding,
+prompt assembly, citation numbering, persistence, and the REST/SSE controller plus the
+chat page). The rest — `agent · cost · mcp · eval · api` — are the target structure
+from `_planning/02-architecture.md`; each is created by the milestone that gives it
+content, not before.
 
 ## Commands
 
@@ -148,6 +154,66 @@ anything that talks to the network or to the database.
   while inside a fence, the table's token accounting was skipped entirely, so an
   unclosed table containing a fenced block escaped its own bound. A new atomic region
   needs testing in combination with the existing ones, not only on its own.
+- **A pgvector kNN query must repeat the `::halfvec(3072)` cast in `ORDER BY`** — the
+  HNSW index is declared on that expression, and the planner matches it only when
+  `ORDER BY` is written identically. Ordering by a selected alias gives correct rows,
+  no error, and a sequential scan.
+  But the cast is necessary, not sufficient. Measured on this corpus: the planner uses
+  the index at `LIMIT` 5 and 8 and abandons it at 12 and 20, and retrieval runs at
+  `RETRIEVAL_TOP_N=20`. On 839 rows a sequential scan genuinely is cheaper, so the
+  planner is right and the index only earns its keep as the corpus grows. A
+  verification that runs `EXPLAIN` at a smaller `LIMIT` than production passes and
+  proves nothing, which is exactly what happened here.
+- **`plainto_tsquery` ANDs every term, and `websearch_to_tsquery` does not fix it.**
+  Measured: a natural-language question matches zero chunks under either, because on
+  prose both produce the identical AND query; `websearch_to_tsquery` only diverges when
+  the user types quotes, `or`, or `-`. The lexical arm rewrites `plainto_tsquery`'s own
+  output from `&` to `|` inside SQL, which keeps its sanitisation and stemming — that
+  is why the question is never tokenised in TypeScript.
+- **The lexical half is an index of literal identifiers, not of a language.** The
+  dictionary is fixed to `english`, so a Portuguese question matches nothing on prose
+  terms — but it still matches any identifier it names, and identifiers are
+  language-neutral. Measured: `'como valido o corpo da requisicao?'` → 0 chunks;
+  `'como uso o ValidationPipe para validar?'` → 18, with the right documents on top. A
+  per-source dictionary only becomes necessary when the ingested *content* is not
+  English.
+- **Grounding is decided by semantic distance, never by a fused rank score.** A fused
+  RRF score encodes rank, not proximity: with two arms its whole range is
+  `[1/61, 2/61]`, and the vector arm always returns its nearest N however far away they
+  are — so there is always a rank-1 chunk. Measured, four clearly out-of-corpus
+  questions scored exactly `1/61`, and one ("how do I file my taxes in Brazil") outscored
+  a real question about custom guards by matching the common word "file". The refusal
+  now compares the vector arm's cosine distance for the nearest chunk against
+  `GROUNDING_MAX_DISTANCE`; distance is a cost, so smaller is better and the comparison
+  refuses when it is *greater*. The threshold is measured, not chosen —
+  `npm run calibrate:floor` re-derives it, and the two populations separate at 0.52843
+  (furthest in-corpus) against 0.71289 (nearest out-of-corpus).
+- **The e2e database is not hermetic.** It holds the fully ingested corpus alongside
+  test fixtures. A test question containing ordinary vocabulary dilutes retrieval
+  ranking and can drop a fixture below the grounding threshold, failing a test for a
+  reason unrelated to what it checks — so a fixture-targeting question must reduce to
+  stopwords plus a lexeme unique to that fixture. For the same reason every e2e query
+  **and** cleanup must be scoped to the rows its own suite created: an unscoped
+  `deleteFrom` cascades into other suites' fixtures, and an unscoped existence check
+  stays green on any leftover row.
+- **`nest build` compiles TypeScript only, and the asset copier does not know where
+  tsc put the output.** Because `scripts/` and `migrations/` compile alongside `src/`,
+  tsc's inferred root is the repository root and `.ts` output lands under `dist/src/**`,
+  so the `nest-cli.json` asset entry needs an explicit `outDir: "dist/src"`. Without it
+  the page exists under `src/` and never reaches `dist/` — working under `start:dev`
+  and returning 500 under `start:prod`, a failure no test reaches because tests run
+  from source.
+- **The SSE wire format's `event:` / `data:` parsing is safe only because every
+  payload is `JSON.stringify`d**, so no newline can appear inside a data value. That
+  pairing is load-bearing: emitting a raw multi-line string would silently corrupt
+  frame parsing on the client.
+- **A test that pins an invariant needs a fixture where violating the invariant
+  changes the result** — and the way to know is to introduce the violation and watch
+  the test fail, not to re-read the test. Repeatedly in this codebase a test that
+  looked correct could not catch the regression it was named for: a fixture already
+  sorted the way the code sorts it, an empty stream chunk placed last where the real
+  API sends it first, an existence check that any leftover row satisfied. Each was
+  found by mutation and none by reading.
 
 ## Security
 
