@@ -2,7 +2,7 @@
 
 # 🧭 docent
 
-**Agentic RAG over your documentation, built as a real backend service — ingestion is live today; grounded answers with citations, multi-provider fallback, cost tracking, and native MCP support are the target design.**
+**Agentic RAG over your documentation, built as a real backend service — ingestion and grounded answers with citations are live today; multi-provider fallback, cost tracking, the evaluation suite, and native MCP support are the target design.**
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
@@ -52,23 +52,30 @@ flowchart TB
     EMB --> VEC[("PostgreSQL + pgvector")]
   end
 
-  subgraph Query["💬 Query pipeline (planned)"]
-    CL["Web UI · REST · MCP"] --> AGENT["Agent Orchestrator"]
+  subgraph Query["💬 Query pipeline"]
+    CL["Web UI · REST"] --> RET["Retriever: vector + lexical fusion"]
+    RET --> VEC
+    RET --> LLM["LLM call (single provider)"]
+    LLM --> ANS["Answer + Citations"]
+  end
+
+  subgraph Agentic["🤖 Agentic layer (planned)"]
+    MCP["MCP"] --> AGENT["Agent Orchestrator"]
     AGENT --> TOOLS["Tools: retriever · web search"]
-    TOOLS --> VEC
     AGENT --> ROUTER["LLM Router + Fallback"]
     ROUTER --> P1["OpenAI"]
     ROUTER --> P2["Gemini"]
     ROUTER --> P3["OpenRouter"]
-    AGENT --> ANS["Answer + Citations"]
   end
 
+  TOOLS -.-> RET
+  ROUTER -.-> LLM
   ROUTER -.-> COST[("Cost & Token Ledger")]
   AGENT -.-> CACHE[("Redis Cache")]
 ```
 
 **Ingestion** turns sources into searchable knowledge: load → chunk (structure-aware) → embed → store in `pgvector`.
-**Query** *(planned)* will answer a question: the agent plans, retrieves relevant chunks, calls an LLM (with fallback), and returns a grounded answer with citations — while cost and tokens are logged.
+**Query** answers a question today by retrieving relevant chunks (fused vector + full-text search), calling a single LLM, and returning a grounded answer with citations — or declining when nothing retrieved is close enough. The agent loop, multi-provider fallback, and cost/token logging are still ahead.
 
 ---
 
