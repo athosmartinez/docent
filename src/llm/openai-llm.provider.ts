@@ -5,6 +5,7 @@ import type {
   CompletionRequest,
   CompletionResult,
   LlmProvider,
+  LlmStream,
 } from './llm.types';
 
 @Injectable()
@@ -41,24 +42,46 @@ export class OpenAiLlmProvider implements LlmProvider {
     };
   }
 
-  async *stream(request: CompletionRequest): AsyncIterable<string> {
-    const response = await this.client.chat.completions.create({
-      model: this.model,
-      messages: [
-        { role: 'system', content: request.system },
-        { role: 'user', content: request.user },
-      ],
-      stream: true,
-    });
+  stream(request: CompletionRequest): LlmStream {
+    let finishReason: string | null = null;
 
-    for await (const chunk of response) {
-      const delta = chunk.choices[0]?.delta.content;
+    const client = this.client;
+    const model = this.model;
 
-      // A chunk with no text is normal — role-only and finish-only chunks
-      // arrive on the same stream — so it is skipped, not treated as an end.
-      if (delta) {
-        yield delta;
+    async function* tokens(): AsyncGenerator<string> {
+      const response = await client.chat.completions.create({
+        model,
+        messages: [
+          { role: 'system', content: request.system },
+          { role: 'user', content: request.user },
+        ],
+        stream: true,
+      });
+
+      for await (const chunk of response) {
+        const choice = chunk.choices[0];
+
+        // The finish reason arrives on the same chunk that carries the last
+        // (often empty) delta, so it is captured on every chunk rather than
+        // assumed to land on one identifiable as "the last".
+        if (choice?.finish_reason) {
+          finishReason = choice.finish_reason;
+        }
+
+        // A chunk with no text is normal — role-only and finish-only chunks
+        // arrive on the same stream — so it is skipped, not treated as an
+        // end.
+        if (choice?.delta.content) {
+          yield choice.delta.content;
+        }
       }
     }
+
+    const iterator = tokens();
+
+    return {
+      [Symbol.asyncIterator]: () => iterator,
+      finishReason: () => finishReason,
+    };
   }
 }

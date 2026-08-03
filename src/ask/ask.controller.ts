@@ -5,6 +5,7 @@ import {
   Get,
   HttpCode,
   Inject,
+  Logger,
   Post,
   Res,
   ServiceUnavailableException,
@@ -26,8 +27,18 @@ const sse = (res: Response, event: string, data: unknown): void => {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 };
 
+// This is the first unauthenticated public POST endpoint the service
+// exposes. An upstream failure's own text (`connect ECONNREFUSED
+// 127.0.0.1:5432`, a bare host and port) has no business reaching a
+// browser, so both failure paths below log the real detail server-side and
+// send only this fixed string over the wire.
+const SERVICE_UNAVAILABLE_MESSAGE =
+  'the service is temporarily unavailable, try again shortly';
+
 @Controller()
 export class AskController {
+  private readonly logger = new Logger(AskController.name);
+
   constructor(
     @Inject(AskService) private readonly service: AskService,
     @Inject(LLM) private readonly llm: LlmProvider,
@@ -52,7 +63,8 @@ export class AskController {
       // down this service is unavailable, not broken, and the class of the
       // status code is what a client reads to decide whether to retry. Nest
       // would otherwise report the default 500.
-      throw new ServiceUnavailableException(describeError(error));
+      this.logger.error(`/ask failed: ${describeError(error)}`);
+      throw new ServiceUnavailableException(SERVICE_UNAVAILABLE_MESSAGE);
     }
   }
 
@@ -88,10 +100,9 @@ export class AskController {
       sse(res, 'citations', toCitations(chunks));
 
       let answer = '';
+      const stream = this.llm.stream(buildPrompt(question, chunks));
 
-      for await (const delta of this.llm.stream(
-        buildPrompt(question, chunks),
-      )) {
+      for await (const delta of stream) {
         answer += delta;
         sse(res, 'token', delta);
       }
@@ -100,19 +111,22 @@ export class AskController {
       // model/provider are recorded null here: the streaming API reports them
       // per chunk rather than once, and threading them through is work M3
       // redoes once a router names the provider that actually served the
-      // request.
+      // request. finishReason is read from the stream itself, after it has
+      // ended, so a completion truncated at the token limit is recorded as
+      // `length`, not silently reported as a clean `stop`.
       await this.service.recordStreamed(
         question,
         chunks,
         answer,
         null,
         null,
-        'stop',
+        stream.finishReason(),
       );
     } catch (error: unknown) {
       // The status line is long gone by now, so a failure can only be
       // reported inside the stream itself.
-      sse(res, 'error', describeError(error));
+      this.logger.error(`/ask/stream failed: ${describeError(error)}`);
+      sse(res, 'error', SERVICE_UNAVAILABLE_MESSAGE);
     } finally {
       res.end();
     }

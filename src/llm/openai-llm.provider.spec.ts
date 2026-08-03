@@ -68,17 +68,19 @@ describe('OpenAiLlmProvider', () => {
     ).rejects.toThrow(/no content/i);
   });
 
-  it('yields the text deltas of a stream in order', async () => {
+  it('yields the text deltas of a stream in order and reports how it finished', async () => {
     // A sync generator is enough: `for await` in the provider consumes sync
     // and async iterables identically, so this fake need not be async too.
     // The leading empty-content chunk mirrors a real stream, whose first
     // chunk is role-only — it must be skipped, not mistaken for the stream's
-    // end, so content arriving after it is still received.
+    // end, so content arriving after it is still received. The trailing
+    // chunk carries the finish reason alongside an empty delta, exactly as
+    // the real API does.
     function* chunks() {
       yield { choices: [{ delta: {} }] };
       yield { choices: [{ delta: { content: 'he' } }] };
       yield { choices: [{ delta: { content: 'llo' } }] };
-      yield { choices: [{ delta: {} }] };
+      yield { choices: [{ delta: {}, finish_reason: 'stop' }] };
     }
 
     const create = jest.fn().mockResolvedValue(chunks());
@@ -86,17 +88,48 @@ describe('OpenAiLlmProvider', () => {
       chat: { completions: { create } },
     } as unknown as OpenAI;
 
+    const stream = new OpenAiLlmProvider(client, 'gpt-4.1-mini').stream(
+      request,
+    );
+
     const received: string[] = [];
-    for await (const delta of new OpenAiLlmProvider(
-      client,
-      'gpt-4.1-mini',
-    ).stream(request)) {
+    for await (const delta of stream) {
       received.push(delta);
     }
 
     expect(received).toEqual(['he', 'llo']);
+    expect(stream.finishReason()).toBe('stop');
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({ stream: true }),
     );
+  });
+
+  // A completion cut off by the token limit reports `length`, not `stop` —
+  // conflating the two would record a truncated answer as though it had
+  // completed normally, which is exactly the failure this method exists to
+  // prevent.
+  it('reports a length finish reason as length, not stop', async () => {
+    function* chunks() {
+      yield { choices: [{ delta: { content: 'partial' } }] };
+      yield { choices: [{ delta: {}, finish_reason: 'length' }] };
+    }
+
+    const create = jest.fn().mockResolvedValue(chunks());
+    const client = {
+      chat: { completions: { create } },
+    } as unknown as OpenAI;
+
+    const stream = new OpenAiLlmProvider(client, 'gpt-4.1-mini').stream(
+      request,
+    );
+
+    const received: string[] = [];
+    for await (const delta of stream) {
+      received.push(delta);
+    }
+
+    expect(received).toEqual(['partial']);
+    expect(stream.finishReason()).toBe('length');
+    expect(stream.finishReason()).not.toBe('stop');
   });
 });

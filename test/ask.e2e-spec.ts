@@ -17,6 +17,7 @@ import {
   LLM,
   type CompletionRequest,
   type LlmProvider,
+  type LlmStream,
 } from '../src/llm/llm.types';
 import type { AskResult } from '../src/ask/ask.types';
 
@@ -32,6 +33,21 @@ const stubEmbeddings: EmbeddingsProvider = {
     ),
 };
 
+// Wraps a plain async-iterable of token deltas as the LlmStream shape the
+// provider interface requires. A stub can supply the finish reason up
+// front; the real provider instead reads it off the stream's last chunk.
+function llmStream(
+  tokens: AsyncIterable<string>,
+  finishReason: string | null = 'stop',
+): LlmStream {
+  const iterator = tokens[Symbol.asyncIterator]();
+
+  return {
+    [Symbol.asyncIterator]: () => iterator,
+    finishReason: () => finishReason,
+  };
+}
+
 const stubLlm: LlmProvider = {
   complete: () =>
     Promise.resolve({
@@ -42,7 +58,7 @@ const stubLlm: LlmProvider = {
     }),
   // A Readable is an AsyncIterable<string> — for await consumes it exactly
   // like a generator — without an async function that has no await in it.
-  stream: () => Readable.from(['Use the ', 'marker option [1].']),
+  stream: () => llmStream(Readable.from(['Use the ', 'marker option [1].'])),
 };
 
 describe('ask', () => {
@@ -236,7 +252,7 @@ describe('ask', () => {
       .overrideProvider(LLM)
       .useValue({
         complete: (request: CompletionRequest) => stubLlm.complete(request),
-        stream: () => Readable.from(explodingTokens()),
+        stream: () => llmStream(Readable.from(explodingTokens())),
       })
       .compile();
 
@@ -258,7 +274,11 @@ describe('ask', () => {
       expect(citationsAt).toBeGreaterThanOrEqual(0);
       expect(tokenAt).toBeGreaterThan(citationsAt);
       expect(errorAt).toBeGreaterThan(tokenAt);
-      expect(response.text).toContain('stream exploded mid-flight');
+      // The upstream error's own text never reaches the wire — only the
+      // fixed, non-specific message does. An unauthenticated public
+      // endpoint must not leak internal failure detail to the client.
+      expect(response.text).not.toContain('stream exploded mid-flight');
+      expect(response.text).toContain('the service is temporarily unavailable');
       expect(response.text).not.toContain('event: done');
     } finally {
       await failingApp.close();
@@ -292,10 +312,19 @@ describe('ask', () => {
     await failingApp.init();
 
     try {
-      await request(failingApp.getHttpServer())
+      const response = await request(failingApp.getHttpServer())
         .post('/ask')
         .send({ question: 'what does unmistakablemarker do?' })
         .expect(503);
+
+      // The upstream error's own text (which could carry an internal host
+      // or port) never reaches the client — only the fixed, non-specific
+      // message does.
+      const body = response.body as { message?: unknown };
+      expect(body.message).not.toContain('upstream is down');
+      expect(body.message).toBe(
+        'the service is temporarily unavailable, try again shortly',
+      );
     } finally {
       await failingApp.close();
     }
@@ -332,6 +361,50 @@ describe('ask', () => {
     expect(rows[0]?.ordinal).toBe(1);
     expect(rows[0]?.grounded).toBe(true);
     expect(rows[0]?.answer).toContain('marker option');
+  });
+
+  it('persists the finish reason a stream actually reports, not a fabricated one', async () => {
+    // Distinct question text so this row is never confused with the 'stop'
+    // row the previous test writes.
+    const question = 'What exactly does unmistakablemarker do?';
+
+    const truncated = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(EMBEDDINGS)
+      .useValue(stubEmbeddings)
+      .overrideProvider(LLM)
+      .useValue({
+        complete: (request: CompletionRequest) => stubLlm.complete(request),
+        stream: () =>
+          llmStream(
+            Readable.from(['Use the ', 'marker option [1].']),
+            'length',
+          ),
+      })
+      .compile();
+
+    const truncatedApp =
+      truncated.createNestApplication<INestApplication<Server>>();
+    await truncatedApp.init();
+
+    try {
+      await request(truncatedApp.getHttpServer())
+        .post('/ask/stream')
+        .send({ question })
+        .expect(200);
+
+      const rows = await db
+        .selectFrom('answers')
+        .innerJoin('queries', 'queries.id', 'answers.query_id')
+        .select(['answers.finish_reason'])
+        .where('queries.question', '=', question)
+        .execute();
+
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows[0]?.finish_reason).toBe('length');
+      expect(rows[0]?.finish_reason).not.toBe('stop');
+    } finally {
+      await truncatedApp.close();
+    }
   });
 
   it('persists a refusal that was streamed, with no citations', async () => {

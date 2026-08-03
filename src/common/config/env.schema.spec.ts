@@ -74,4 +74,19 @@ describe('validateEnv', () => {
       validateEnv({ ...valid, EMBEDDING_DIMENSIONS: '1536' }),
     ).toThrow(/EMBEDDING_DIMENSIONS/);
   });
+
+  // Cosine distance never exceeds 2, so a configured value at or above it
+  // would admit every question regardless of how far the nearest chunk
+  // actually is — silently disabling refusal rather than failing at boot.
+  it('rejects a GROUNDING_MAX_DISTANCE at the cosine-distance ceiling', () => {
+    expect(() =>
+      validateEnv({ ...valid, GROUNDING_MAX_DISTANCE: '2' }),
+    ).toThrow(/GROUNDING_MAX_DISTANCE/);
+  });
+
+  it('accepts a GROUNDING_MAX_DISTANCE just under the ceiling', () => {
+    const env = validateEnv({ ...valid, GROUNDING_MAX_DISTANCE: '1.9999' });
+
+    expect(env.GROUNDING_MAX_DISTANCE).toBe(1.9999);
+  });
 });

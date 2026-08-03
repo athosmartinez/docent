@@ -186,8 +186,14 @@ anything that talks to the network or to the database.
   now compares the vector arm's cosine distance for the nearest chunk against
   `GROUNDING_MAX_DISTANCE`; distance is a cost, so smaller is better and the comparison
   refuses when it is *greater*. The threshold is measured, not chosen —
-  `npm run calibrate:floor` re-derives it, and the two populations separate at 0.52843
-  (furthest in-corpus) against 0.71289 (nearest out-of-corpus).
+  `npm run calibrate:floor` re-derives it. Over 30 in-corpus questions (drawn from the
+  corpus's own headings, so each is demonstrably answerable) and 14 out-of-corpus ones,
+  the populations overlap by a hair: the furthest in-corpus question ("how do I upload a
+  file?") measured 0.61568, closer than the nearest out-of-corpus one ("how do I write a
+  Dockerfile for a Python Flask app?") at 0.60737. No single threshold gets every
+  question in the sample right. The default is set to the furthest in-corpus distance
+  measured, because refusing a question the corpus can actually answer costs more than
+  answering one that merely sounds related.
 - **The e2e database is not hermetic.** It holds the fully ingested corpus alongside
   test fixtures. A test question containing ordinary vocabulary dilutes retrieval
   ranking and can drop a fixture below the grounding threshold, failing a test for a
