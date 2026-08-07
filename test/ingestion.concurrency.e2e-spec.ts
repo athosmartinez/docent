@@ -15,6 +15,7 @@ import {
   type EmbeddingsProvider,
 } from '../src/embeddings/embeddings.types';
 import { waitForProcessing, waitForStatus } from './support/wait-for-source';
+import { listenOnEphemeralPort } from './support/listening-app';
 
 // A directory distinct from the one test/ingestion.e2e-spec.ts uses as its
 // source URI: both files can run in separate Jest workers against the same
@@ -64,7 +65,7 @@ describe('concurrent ingestion requests', () => {
 
     app = moduleRef.createNestApplication();
     app.enableShutdownHooks();
-    await app.init();
+    await listenOnEphemeralPort(app);
     db = moduleRef.get<Kysely<DB>>(KYSELY);
   });
 
