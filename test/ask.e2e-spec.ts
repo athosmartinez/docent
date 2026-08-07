@@ -1,4 +1,5 @@
 import { Test } from '@nestjs/testing';
+import type { TestingModuleBuilder } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { Kysely, sql } from 'kysely';
 import request from 'supertest';
@@ -20,17 +21,26 @@ import {
   type LlmStream,
 } from '../src/llm/llm.types';
 import type { AskResult } from '../src/ask/ask.types';
+import { listenOnEphemeralPort } from './support/listening-app';
+
+/**
+ * The vector this suite's fixture chunk carries, and the vector its stub
+ * returns for every question. Question and fixture therefore sit at cosine
+ * distance 0, so nothing another suite owns can outrank the fixture, whatever
+ * happens to be in the shared database at the time.
+ *
+ * A stub deriving the vector from the text's length would not do: that is the
+ * identical formula `ingestion.e2e-spec.ts` uses for the corpus it ingests and
+ * deletes throughout its own run, which put that suite's chunks at the top of
+ * this one's results.
+ */
+const FIXTURE_VECTOR = Array.from(
+  { length: CHUNK_EMBEDDING_DIMENSIONS },
+  (_v, i) => i / 10000,
+);
 
 const stubEmbeddings: EmbeddingsProvider = {
-  embed: (texts) =>
-    Promise.resolve(
-      texts.map((text) =>
-        Array.from(
-          { length: CHUNK_EMBEDDING_DIMENSIONS },
-          (_v, i) => ((text.length + i) % 100) / 100,
-        ),
-      ),
-    ),
+  embed: (texts) => Promise.resolve(texts.map(() => [...FIXTURE_VECTOR])),
 };
 
 // Wraps a plain async-iterable of token deltas as the LlmStream shape the
@@ -61,6 +71,28 @@ const stubLlm: LlmProvider = {
   stream: () => llmStream(Readable.from(['Use the ', 'marker option [1].'])),
 };
 
+/**
+ * The overrides every module in this file needs. `RETRIEVAL_TOP_K` is pinned
+ * to 1 so an answer cites only the chunk this suite owns.
+ *
+ * The database is shared: other suites ingest and delete `ready` sources while
+ * this one answers, and a citation pointing at a chunk deleted between
+ * retrieval and the insert violates the foreign key. That aborts the whole
+ * `record` transaction, which `persist` swallows by design — so the row simply
+ * never appears, and the assertion fails as though persistence were broken.
+ * Citing only what this suite owns closes the window instead of narrowing it.
+ *
+ * Numbering several citations 1..n is a unit-test concern and stays covered in
+ * `src/ask/prompt.spec.ts`; nothing is lost by asking for one here.
+ */
+function askTestingModule(): TestingModuleBuilder {
+  return Test.createTestingModule({ imports: [AppModule] })
+    .overrideProvider(EMBEDDINGS)
+    .useValue(stubEmbeddings)
+    .overrideProvider('RETRIEVAL_TOP_K')
+    .useValue(1);
+}
+
 describe('ask', () => {
   let app: INestApplication<Server>;
   let db: Kysely<DB>;
@@ -68,15 +100,13 @@ describe('ask', () => {
   let markerChunkId: string;
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
-      .overrideProvider(EMBEDDINGS)
-      .useValue(stubEmbeddings)
+    const moduleRef = await askTestingModule()
       .overrideProvider(LLM)
       .useValue(stubLlm)
       .compile();
 
     app = moduleRef.createNestApplication();
-    await app.init();
+    await listenOnEphemeralPort(app);
 
     db = app.get<Kysely<DB>>(KYSELY);
 
@@ -93,17 +123,12 @@ describe('ask', () => {
       .returning('id')
       .executeTakeFirstOrThrow();
 
-    const vector = Array.from(
-      { length: CHUNK_EMBEDDING_DIMENSIONS },
-      (_v, i) => i / 10000,
-    );
-
     const chunk = await sql<{ id: string }>`
       INSERT INTO chunks (document_id, ordinal, content, heading_path, token_count, embedding)
       VALUES (${document.id}, 0,
               'The unmistakablemarker option enables strict validation.',
               ARRAY['Marker'], 8,
-              ${`[${vector.join(',')}]`}::vector)
+              ${`[${FIXTURE_VECTOR.join(',')}]`}::vector)
       RETURNING id
     `.execute(db);
     markerChunkId = chunk.rows[0]!.id;
@@ -173,10 +198,11 @@ describe('ask', () => {
       .orderBy('citations.ordinal')
       .execute();
 
-    // The top-ranked citation is the fixture chunk itself, not merely any
-    // row — the real corpus this suite runs alongside contributes lower-
-    // ranked citations of its own once the answer is grounded.
-    expect(rows[0]).toEqual({ ordinal: 1, chunk_id: markerChunkId });
+    // Exactly the fixture chunk, and nothing else: the suite asks for one
+    // citation and owns the chunk that wins it. Asserting the length as well
+    // as the row is what makes a citation leaking in from another suite's
+    // fixtures a failure here rather than a silent passenger.
+    expect(rows).toEqual([{ ordinal: 1, chunk_id: markerChunkId }]);
   });
 
   it('streams citations before the first token', async () => {
@@ -206,9 +232,7 @@ describe('ask', () => {
 
     // No finite distance can ever clear a threshold of negative infinity, so
     // retrieval reports ungrounded regardless of what the corpus contains.
-    const ungrounded = await Test.createTestingModule({ imports: [AppModule] })
-      .overrideProvider(EMBEDDINGS)
-      .useValue(stubEmbeddings)
+    const ungrounded = await askTestingModule()
       .overrideProvider(LLM)
       .useValue(countingLlm)
       .overrideProvider('GROUNDING_MAX_DISTANCE')
@@ -217,7 +241,7 @@ describe('ask', () => {
 
     const ungroundedApp =
       ungrounded.createNestApplication<INestApplication<Server>>();
-    await ungroundedApp.init();
+    await listenOnEphemeralPort(ungroundedApp);
 
     try {
       const response = await request(ungroundedApp.getHttpServer())
@@ -246,9 +270,7 @@ describe('ask', () => {
       throw new Error('stream exploded mid-flight');
     }
 
-    const failing = await Test.createTestingModule({ imports: [AppModule] })
-      .overrideProvider(EMBEDDINGS)
-      .useValue(stubEmbeddings)
+    const failing = await askTestingModule()
       .overrideProvider(LLM)
       .useValue({
         complete: (request: CompletionRequest) => stubLlm.complete(request),
@@ -258,7 +280,7 @@ describe('ask', () => {
 
     const failingApp =
       failing.createNestApplication<INestApplication<Server>>();
-    await failingApp.init();
+    await listenOnEphemeralPort(failingApp);
 
     try {
       const response = await request(failingApp.getHttpServer())
@@ -295,9 +317,7 @@ describe('ask', () => {
   it('answers 503, not 500, when the provider fails', async () => {
     // A failing upstream is unavailability, not a bug in this service, and a
     // client deciding whether to retry reads the class of the status code.
-    const failing = await Test.createTestingModule({ imports: [AppModule] })
-      .overrideProvider(EMBEDDINGS)
-      .useValue(stubEmbeddings)
+    const failing = await askTestingModule()
       .overrideProvider(LLM)
       .useValue({
         complete: () => Promise.reject(new Error('upstream is down')),
@@ -309,7 +329,7 @@ describe('ask', () => {
 
     const failingApp =
       failing.createNestApplication<INestApplication<Server>>();
-    await failingApp.init();
+    await listenOnEphemeralPort(failingApp);
 
     try {
       const response = await request(failingApp.getHttpServer())
@@ -336,11 +356,9 @@ describe('ask', () => {
     // reuse 'what does unmistakablemarker do?' verbatim (one of them over the
     // JSON endpoint, which has always recorded), so filtering by substring
     // would let this test pass on a row a different endpoint wrote, whether
-    // or not the streaming path records anything at all. Case does not
-    // change tsvector lexemes or the stub embedding (a function of string
-    // length only), so this ranks identically to the phrasing already proven
-    // not to dilute below the grounding threshold against the real,
-    // non-hermetic corpus.
+    // or not the streaming path records anything at all. Case changes neither
+    // the tsvector lexemes nor the stub embedding, which ignores its input, so
+    // this ranks identically to the phrasings above.
     const question = 'What does unmistakablemarker do?';
 
     await request(app.getHttpServer())
@@ -368,9 +386,7 @@ describe('ask', () => {
     // row the previous test writes.
     const question = 'What exactly does unmistakablemarker do?';
 
-    const truncated = await Test.createTestingModule({ imports: [AppModule] })
-      .overrideProvider(EMBEDDINGS)
-      .useValue(stubEmbeddings)
+    const truncated = await askTestingModule()
       .overrideProvider(LLM)
       .useValue({
         complete: (request: CompletionRequest) => stubLlm.complete(request),
@@ -384,7 +400,7 @@ describe('ask', () => {
 
     const truncatedApp =
       truncated.createNestApplication<INestApplication<Server>>();
-    await truncatedApp.init();
+    await listenOnEphemeralPort(truncatedApp);
 
     try {
       await request(truncatedApp.getHttpServer())
@@ -420,9 +436,7 @@ describe('ask', () => {
     // finite distance can clear, not by picking a question that happens to
     // score badly — which would break the moment the corpus or the floor
     // moved.
-    const ungrounded = await Test.createTestingModule({ imports: [AppModule] })
-      .overrideProvider(EMBEDDINGS)
-      .useValue(stubEmbeddings)
+    const ungrounded = await askTestingModule()
       .overrideProvider(LLM)
       .useValue(stubLlm)
       .overrideProvider('GROUNDING_MAX_DISTANCE')
@@ -431,7 +445,7 @@ describe('ask', () => {
 
     const ungroundedApp =
       ungrounded.createNestApplication<INestApplication<Server>>();
-    await ungroundedApp.init();
+    await listenOnEphemeralPort(ungroundedApp);
 
     try {
       await request(ungroundedApp.getHttpServer())
