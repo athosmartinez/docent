@@ -144,14 +144,21 @@ describe('ask repository', () => {
   it('writes query and answer in one transaction', async () => {
     // A citation pointing at a chunk that does not exist violates the foreign
     // key, and must leave no orphan query behind.
-    const before = await db
-      .selectFrom('queries')
-      .select(db.fn.countAll().as('n'))
-      .executeTakeFirstOrThrow();
+    //
+    // The check is on rows carrying this question, never on a count of the
+    // whole table: the e2e runner uses Jest's default parallelism across spec
+    // files, so a neighbouring suite committing its own query between the two
+    // reads moves a total that this test would then blame on the transaction.
+    const question = 'doomed by a citation to a chunk that does not exist';
+
+    // Any row left by an earlier run of this test would itself be the defect
+    // under test, so clearing first keeps a single past failure from pinning
+    // this red forever.
+    await db.deleteFrom('queries').where('question', '=', question).execute();
 
     await expect(
       repository.record({
-        question: 'doomed',
+        question,
         answer: 'x',
         grounded: true,
         model: 'm',
@@ -169,11 +176,12 @@ describe('ask repository', () => {
       }),
     ).rejects.toThrow();
 
-    const after = await db
+    const orphans = await db
       .selectFrom('queries')
-      .select(db.fn.countAll().as('n'))
-      .executeTakeFirstOrThrow();
+      .select('id')
+      .where('question', '=', question)
+      .execute();
 
-    expect(after.n).toEqual(before.n);
+    expect(orphans).toEqual([]);
   });
 });
