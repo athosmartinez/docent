@@ -90,3 +90,45 @@ describe('validateEnv', () => {
     expect(env.GROUNDING_MAX_DISTANCE).toBe(1.9999);
   });
 });
+
+const base = {
+  DATABASE_URL: 'postgresql://u:p@localhost:5432/d',
+  REDIS_URL: 'redis://localhost:6379',
+  OPENAI_API_KEY: 'sk-test',
+};
+
+describe('validateEnv — the provider chain', () => {
+  it('accepts a chain whose providers all have keys', () => {
+    const env = validateEnv({
+      ...base,
+      OPENROUTER_API_KEY: 'or-test',
+      LLM_CHAIN: 'openai:gpt-4.1-mini,openrouter:google/gemini-2.5-flash',
+    });
+
+    expect(env.LLM_CHAIN).toBe(
+      'openai:gpt-4.1-mini,openrouter:google/gemini-2.5-flash',
+    );
+  });
+
+  // Failing here rather than on the first request is the whole point: a
+  // missing key turns the fallback link into a link that always fails, and
+  // that is indistinguishable from a healthy chain until the primary breaks
+  // — which is exactly when the fallback was supposed to save you.
+  it('refuses a chain naming a provider with no key', () => {
+    expect(() =>
+      validateEnv({ ...base, LLM_CHAIN: 'openai:gpt-4.1-mini,openrouter:x' }),
+    ).toThrow(/OPENROUTER_API_KEY/);
+  });
+
+  it('refuses a malformed chain, reporting why the parser rejected it', () => {
+    expect(() => validateEnv({ ...base, LLM_CHAIN: 'openai:' })).toThrow(
+      /provider:model/i,
+    );
+  });
+
+  it('refuses a chain that repeats a provider:model pair', () => {
+    expect(() =>
+      validateEnv({ ...base, LLM_CHAIN: 'openai:m,openai:m' }),
+    ).toThrow(/repeated/i);
+  });
+});

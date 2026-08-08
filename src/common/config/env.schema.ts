@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
 import { CHUNK_EMBEDDING_DIMENSIONS } from '../database/schema';
+import { describeError } from '../describe-error';
+import { parseLlmChain } from '../../llm/llm-chain';
 
 export const envSchema = z
   .object({
@@ -20,7 +22,12 @@ export const envSchema = z
     RETRIEVAL_TOP_N: z.coerce.number().int().positive().default(20),
     RETRIEVAL_TOP_K: z.coerce.number().int().positive().default(8),
     RRF_K: z.coerce.number().int().positive().default(60),
-    ANSWER_MODEL: z.string().min(1).default('gpt-4.1-mini'),
+    // One link by default. The fallback chain is opt-in because every
+    // provider named here must have a key, and a fresh clone has only
+    // OPENAI_API_KEY — defaulting to two links would mean the service does
+    // not start until someone signs up for a second provider.
+    LLM_CHAIN: z.string().min(1).default('openai:gpt-4.1-mini'),
+    OPENROUTER_API_KEY: z.string().min(1).optional(),
     ANSWER_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
     EMBEDDING_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
     // Measured (scripts/calibrate-floor.ts) against the ingested Nest corpus
@@ -43,6 +50,37 @@ export const envSchema = z
   .refine((env) => env.EMBEDDING_DIMENSIONS === CHUNK_EMBEDDING_DIMENSIONS, {
     message: `must be ${CHUNK_EMBEDDING_DIMENSIONS}, the dimensionality the chunks column declares`,
     path: ['EMBEDDING_DIMENSIONS'],
+  })
+  .superRefine((env, ctx) => {
+    let links;
+
+    try {
+      links = parseLlmChain(env.LLM_CHAIN);
+    } catch (error: unknown) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['LLM_CHAIN'],
+        message: describeError(error),
+      });
+      return;
+    }
+
+    // A link whose provider has no key is a link that always fails, which
+    // looks exactly like a healthy chain until the primary breaks.
+    const keys: Record<string, string | undefined> = {
+      openai: env.OPENAI_API_KEY,
+      openrouter: env.OPENROUTER_API_KEY,
+    };
+
+    for (const link of links) {
+      if (!keys[link.provider]) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['LLM_CHAIN'],
+          message: `link '${link.provider}:${link.model}' needs ${link.provider.toUpperCase()}_API_KEY`,
+        });
+      }
+    }
   });
 
 export type Env = z.infer<typeof envSchema>;
