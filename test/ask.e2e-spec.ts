@@ -54,7 +54,14 @@ function llmStream(
 
   return {
     [Symbol.asyncIterator]: () => iterator,
-    finishReason: () => finishReason,
+    outcome: () => ({
+      model: 'stub-model',
+      provider: 'stub',
+      finishReason,
+      usage: null,
+      reportedCostUsd: null,
+      modelReason: 'primary',
+    }),
   };
 }
 
@@ -65,6 +72,9 @@ const stubLlm: LlmProvider = {
       model: 'stub-model',
       provider: 'stub',
       finishReason: 'stop',
+      usage: null,
+      reportedCostUsd: null,
+      modelReason: 'primary',
     }),
   // A Readable is an AsyncIterable<string> — for await consumes it exactly
   // like a generator — without an async function that has no await in it.

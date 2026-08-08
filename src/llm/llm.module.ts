@@ -4,7 +4,7 @@ import OpenAI from 'openai';
 
 import type { Env } from '../common/config/env.schema';
 import { LLM } from './llm.types';
-import { OpenAiLlmProvider } from './openai-llm.provider';
+import { OpenAiCompatibleProvider } from './openai-compatible.provider';
 
 @Global()
 @Module({
@@ -12,7 +12,9 @@ import { OpenAiLlmProvider } from './openai-llm.provider';
     {
       provide: LLM,
       inject: [ConfigService],
-      useFactory: (config: ConfigService<Env, true>): OpenAiLlmProvider => {
+      useFactory: (
+        config: ConfigService<Env, true>,
+      ): OpenAiCompatibleProvider => {
         const model = config.get('ANSWER_MODEL', { infer: true });
         const client = new OpenAI({
           apiKey: config.get('OPENAI_API_KEY', { infer: true }),
@@ -21,7 +23,7 @@ import { OpenAiLlmProvider } from './openai-llm.provider';
 
         new Logger('Llm').log(`answering with ${model}`);
 
-        return new OpenAiLlmProvider(client, model);
+        return new OpenAiCompatibleProvider(client, 'openai', model);
       },
     },
   ],

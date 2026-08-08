@@ -120,7 +120,7 @@ export class AskController {
         answer,
         null,
         null,
-        stream.finishReason(),
+        stream.outcome().finishReason,
       );
     } catch (error: unknown) {
       // The status line is long gone by now, so a failure can only be
