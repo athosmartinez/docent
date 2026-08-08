@@ -74,7 +74,7 @@ flowchart TB
   AGENT -.-> CACHE[("Redis Cache")]
 ```
 
-**Ingestion** turns sources into searchable knowledge: load → chunk (structure-aware) → embed → store in `pgvector`.
+**Ingestion** turns sources into searchable knowledge: load → chunk (structure-aware: headings, fenced code and tables are never split) → embed → store in `pgvector`.
 **Query** answers a question today by retrieving relevant chunks (fused vector + full-text search), calling a single LLM, and returning a grounded answer with citations — or declining when nothing retrieved is close enough. The agent loop, multi-provider fallback, and cost/token logging are still ahead.
 
 ---
