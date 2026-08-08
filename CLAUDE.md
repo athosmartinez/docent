@@ -47,9 +47,10 @@ the flags that will bite you first on the wrong runtime.
 - Eval via promptfoo + LLM-as-judge
 
 Modules under `src/` today: **`common`** (config, database, redis, shared helpers),
-**`health`**, **`ingestion`** (source fetching, markdown cleaning, chunking, and the
-repository that writes documents/chunks), **`embeddings`** (the OpenAI embeddings
-provider), **`retrieval`** (the vector + lexical queries and their RRF fusion),
+**`health`**, **`ingestion`** (source fetching, markdown cleaning, HTML-table
+conversion, chunking, and the repository that writes documents/chunks),
+**`embeddings`** (the OpenAI embeddings provider),
+**`retrieval`** (the vector + lexical queries and their RRF fusion),
 **`llm`** (the completion provider used to answer a question) and **`ask`** (grounding,
 prompt assembly, citation numbering, persistence, and the REST/SSE controller plus the
 chat page). The rest — `agent · cost · mcp · eval · api` — are the target structure

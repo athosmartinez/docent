@@ -47,7 +47,7 @@ Unlike a typical demo chatbot, `docent` is built like a real backend service, in
 ```mermaid
 flowchart TB
   subgraph Ingestion["📥 Ingestion pipeline"]
-    SRC["Docs · Code (planned)"] --> CHUNK["Loader & Chunker"]
+    SRC["Docs · Code (planned)"] --> CHUNK["Loader & Chunker (structure-aware)"]
     CHUNK --> EMB["Embeddings"]
     EMB --> VEC[("PostgreSQL + pgvector")]
   end
