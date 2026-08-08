@@ -16,6 +16,7 @@ import {
   type EmbeddingsProvider,
 } from '../src/embeddings/embeddings.types';
 import { waitForProcessing, waitForStatus } from './support/wait-for-source';
+import { listenOnEphemeralPort } from './support/listening-app';
 
 // A directory distinct from every other spec file's source URI: Jest runs
 // spec files in separate workers against the same live database, and
@@ -81,7 +82,7 @@ describe('ingestion lease heartbeat', () => {
 
     app = moduleRef.createNestApplication();
     app.enableShutdownHooks();
-    await app.init();
+    await listenOnEphemeralPort(app);
     db = moduleRef.get<Kysely<DB>>(KYSELY);
   });
 

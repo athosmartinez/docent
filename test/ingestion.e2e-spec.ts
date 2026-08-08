@@ -16,6 +16,7 @@ import {
 import { IngestionRepository } from '../src/ingestion/ingestion.repository';
 import { IngestionService } from '../src/ingestion/ingestion.service';
 import { waitForStatus } from './support/wait-for-source';
+import { listenOnEphemeralPort } from './support/listening-app';
 
 const FIXTURES = path.resolve(__dirname, 'fixtures/corpus');
 
@@ -47,7 +48,7 @@ describe('ingestion', () => {
 
     app = moduleRef.createNestApplication();
     app.enableShutdownHooks();
-    await app.init();
+    await listenOnEphemeralPort(app);
     db = moduleRef.get<Kysely<DB>>(KYSELY);
   });
 

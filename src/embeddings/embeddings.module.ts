@@ -18,6 +18,7 @@ import { OpenAiEmbeddingsProvider } from './openai-embeddings.provider';
         const logger = new Logger('Embeddings');
         const client = new OpenAI({
           apiKey: config.get('OPENAI_API_KEY', { infer: true }),
+          timeout: config.get('EMBEDDING_TIMEOUT_MS', { infer: true }),
         });
 
         logger.log(`using ${config.get('EMBEDDING_MODEL', { infer: true })}`);

@@ -4,6 +4,7 @@ import type { Server } from 'node:http';
 import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
+import { listenOnEphemeralPort } from './support/listening-app';
 
 interface HealthResponseBody {
   status: string;
@@ -26,7 +27,7 @@ describe('GET /health', () => {
 
     app = moduleRef.createNestApplication();
     app.enableShutdownHooks();
-    await app.init();
+    await listenOnEphemeralPort(app);
   });
 
   afterAll(async () => {
