@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 
 import { describeError } from '../common/describe-error';
+import { withTimeout } from '../common/with-timeout';
 import type { ChainLink } from './llm-chain';
 import type {
   CompletionRequest,
@@ -22,6 +23,36 @@ import type {
 export interface RoutedLink {
   readonly chain: ChainLink;
   readonly provider: LlmProvider;
+}
+
+// `.return()` closing an abandoned candidate's connection is local teardown
+// (aborting a fetch reader), not a round trip, so it should settle quickly;
+// bounded generously in case an SDK's internal cleanup does something slow,
+// still far below anything a caller would notice stacked onto response
+// teardown.
+const CLOSE_TIMEOUT_MS = 1_000;
+
+/**
+ * Closes a link the router is leaving behind — one that lost the peek,
+ * ended with nothing, or is being abandoned mid-stream because the caller
+ * stopped consuming. `.return()` is what releases the underlying provider
+ * connection, but nothing guarantees it settles, or settles without
+ * throwing — and cleanup must never be able to change what the caller sees.
+ * Bounded by `withTimeout`; a close that times out or rejects is logged and
+ * dropped, never re-thrown, so it can neither hang the caller nor replace
+ * the answer (or the failure) the caller already has.
+ */
+async function closeQuietly(
+  iterator: AsyncIterator<string>,
+  provider: string,
+): Promise<void> {
+  try {
+    await withTimeout(Promise.resolve(iterator.return?.()), CLOSE_TIMEOUT_MS);
+  } catch (error: unknown) {
+    new Logger('LlmRouter').warn(
+      `${provider}: failed to close abandoned stream: ${describeError(error)}`,
+    );
+  }
 }
 
 @Injectable()
@@ -78,13 +109,17 @@ export class LlmRouter implements LlmProvider {
           first = await iterator.next();
         } catch (error: unknown) {
           failures.push(`${chain.provider}: ${describeError(error)}`);
+          await closeQuietly(iterator, chain.provider);
           continue;
         }
 
         chosen = candidate;
         reason = reasonFor(failures);
 
-        if (first.done === true) return;
+        if (first.done === true) {
+          await closeQuietly(iterator, chain.provider);
+          return;
+        }
 
         try {
           yield first.value;
@@ -104,8 +139,11 @@ export class LlmRouter implements LlmProvider {
           // forwarding that into the candidate's own iterator, its
           // generator is left suspended mid-stream, holding the provider's
           // response open until whatever upstream timeout eventually kills
-          // it.
-          await iterator.return?.();
+          // it. closeQuietly never throws and never hangs past its own
+          // bound, so this finally can't replace whatever the try block
+          // was in the middle of producing — a value, a normal return, or
+          // a failure already propagating out of it.
+          await closeQuietly(iterator, chain.provider);
         }
         return;
       }

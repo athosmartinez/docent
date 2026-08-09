@@ -69,6 +69,36 @@ function entry(
   };
 }
 
+// Wraps a plain async generator with a custom `.return`, so a test can
+// control exactly what closing an abandoned candidate does — hang, throw,
+// or count calls — independently of the delta sequence itself.
+function withCustomClose(
+  tokens: AsyncGenerator<string>,
+  close: () => Promise<IteratorResult<string>>,
+): LlmStream {
+  return {
+    [Symbol.asyncIterator]: () => ({
+      next: () => tokens.next(),
+      return: close,
+    }),
+    outcome: () => ({
+      model: 'm',
+      provider: 'openai',
+      finishReason: 'stop',
+      usage: null,
+      reportedCostUsd: null,
+      modelReason: 'primary',
+    }),
+  };
+}
+
+function hangsForever(): Promise<IteratorResult<string>> {
+  return new Promise<IteratorResult<string>>(() => {
+    // Never settles — the point is to prove the router bounds its own
+    // wait rather than trusting a candidate's close to ever resolve.
+  });
+}
+
 describe('LlmRouter', () => {
   it('answers from the first link when it works', async () => {
     const router = new LlmRouter([
@@ -290,5 +320,175 @@ describe('LlmRouter', () => {
     ]);
 
     await expect(router.complete(request)).rejects.toThrow(/openrouter: boom/);
+  });
+
+  // Closing an abandoned candidate is best-effort: nothing guarantees
+  // `.return()` ever settles, and the router must not trust it to. Without
+  // a bound, both of these hang forever instead of reaching their
+  // assertions.
+  it('bounds a close that never settles so a fully consumed stream still completes', async () => {
+    async function* tokens(): AsyncGenerator<string> {
+      await Promise.resolve();
+      yield 'a';
+      yield 'b';
+    }
+    const provider: LlmProvider = {
+      complete: () => Promise.reject(new Error('unused')),
+      stream: () => withCustomClose(tokens(), hangsForever),
+    };
+
+    const router = new LlmRouter([
+      { chain: { provider: 'openai', model: 'm' }, provider },
+    ]);
+
+    const received: string[] = [];
+    for await (const delta of router.stream(request)) received.push(delta);
+
+    expect(received).toEqual(['a', 'b']);
+  });
+
+  it('bounds a close that never settles so a mid-stream failure still surfaces', async () => {
+    async function* tokens(): AsyncGenerator<string> {
+      await Promise.resolve();
+      yield 'a';
+      throw new Error('mid-stream boom');
+    }
+    const provider: LlmProvider = {
+      complete: () => Promise.reject(new Error('unused')),
+      stream: () => withCustomClose(tokens(), hangsForever),
+    };
+
+    const router = new LlmRouter([
+      { chain: { provider: 'openai', model: 'm' }, provider },
+    ]);
+
+    const received: string[] = [];
+    await expect(
+      (async () => {
+        for await (const delta of router.stream(request)) received.push(delta);
+      })(),
+    ).rejects.toThrow('mid-stream boom');
+    expect(received).toEqual(['a']);
+  });
+
+  // Cleanup reports, it never decides what the caller sees: a close that
+  // fails must not be able to overwrite an answer or a failure that already
+  // happened.
+  it('does not let a failing close replace a completed answer', async () => {
+    async function* tokens(): AsyncGenerator<string> {
+      await Promise.resolve();
+      yield 'a';
+      yield 'b';
+    }
+    const provider: LlmProvider = {
+      complete: () => Promise.reject(new Error('unused')),
+      stream: () =>
+        withCustomClose(tokens(), () =>
+          Promise.reject(new Error('openai close failed')),
+        ),
+    };
+
+    const router = new LlmRouter([
+      { chain: { provider: 'openai', model: 'm' }, provider },
+    ]);
+
+    const received: string[] = [];
+    for await (const delta of router.stream(request)) received.push(delta);
+
+    expect(received).toEqual(['a', 'b']);
+  });
+
+  it('does not let a failing close replace the original mid-stream failure', async () => {
+    async function* tokens(): AsyncGenerator<string> {
+      await Promise.resolve();
+      yield 'a';
+      throw new Error('mid-stream boom');
+    }
+    const provider: LlmProvider = {
+      complete: () => Promise.reject(new Error('unused')),
+      stream: () =>
+        withCustomClose(tokens(), () =>
+          Promise.reject(new Error('openai close failed')),
+        ),
+    };
+
+    const router = new LlmRouter([
+      { chain: { provider: 'openai', model: 'm' }, provider },
+    ]);
+
+    const received: string[] = [];
+    await expect(
+      (async () => {
+        for await (const delta of router.stream(request)) received.push(delta);
+      })(),
+    ).rejects.toThrow('mid-stream boom');
+    expect(received).toEqual(['a']);
+  });
+
+  // A link the router walks away from without ever choosing it — one that
+  // lost the peek — still opened a connection and still needs it closed.
+  it('closes a link that is rejected during the peek', async () => {
+    let returnCalls = 0;
+    const rejected: LlmProvider = {
+      complete: () => Promise.reject(new Error('unused')),
+      stream: (): LlmStream => ({
+        [Symbol.asyncIterator]: () => ({
+          next: () => Promise.reject(new Error('dropped')),
+          return: () => {
+            returnCalls += 1;
+            return Promise.resolve({ value: undefined, done: true });
+          },
+        }),
+        outcome: () => ({
+          model: 'm',
+          provider: 'openai',
+          finishReason: 'stop',
+          usage: null,
+          reportedCostUsd: null,
+          modelReason: 'primary',
+        }),
+      }),
+    };
+
+    const router = new LlmRouter([
+      { chain: { provider: 'openai', model: 'm' }, provider: rejected },
+      entry('openrouter', { deltas: ['x'] }),
+    ]);
+
+    for await (const delta of router.stream(request)) void delta;
+
+    expect(returnCalls).toBe(1);
+  });
+
+  it('closes a link that ends with zero deltas', async () => {
+    let returnCalls = 0;
+    const empty: LlmProvider = {
+      complete: () => Promise.reject(new Error('unused')),
+      stream: (): LlmStream => ({
+        [Symbol.asyncIterator]: () => ({
+          next: () => Promise.resolve({ value: undefined, done: true }),
+          return: () => {
+            returnCalls += 1;
+            return Promise.resolve({ value: undefined, done: true });
+          },
+        }),
+        outcome: () => ({
+          model: 'm',
+          provider: 'openai',
+          finishReason: 'stop',
+          usage: null,
+          reportedCostUsd: null,
+          modelReason: 'primary',
+        }),
+      }),
+    };
+
+    const router = new LlmRouter([
+      { chain: { provider: 'openai', model: 'm' }, provider: empty },
+    ]);
+
+    for await (const delta of router.stream(request)) void delta;
+
+    expect(returnCalls).toBe(1);
   });
 });
