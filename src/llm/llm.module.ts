@@ -4,42 +4,48 @@ import OpenAI from 'openai';
 
 import type { Env } from '../common/config/env.schema';
 import { parseLlmChain } from './llm-chain';
+import { LlmRouter } from './llm.router';
 import { LLM } from './llm.types';
 import { OpenAiCompatibleProvider } from './openai-compatible.provider';
 
-// The router that walks the whole chain lands in a later task; for now this
-// still calls exactly one provider, so it only ever needs the chain's first
-// link. Config validation already parsed and key-checked LLM_CHAIN at boot,
-// so a parse failure here would mean that guarantee broke, not that this
-// value is unvalidated.
-//
-// A first link naming any provider other than 'openai' is refused rather
-// than silently honoured: this client is hardcoded to OpenAI's endpoint and
-// key, so building it anyway would send an OpenAI key to OpenAI while
-// reporting the answer as though it came from whatever the chain named —
-// wrong endpoint, wrong credential, no error. A loud boot failure is the
-// correct outcome until the router replaces this factory.
-export function createLlmProvider(
-  config: ConfigService<Env, true>,
-): OpenAiCompatibleProvider {
-  const [firstLink] = parseLlmChain(config.get('LLM_CHAIN', { infer: true }));
-  if (!firstLink) {
-    throw new Error('LLM_CHAIN produced no links');
-  }
-  if (firstLink.provider !== 'openai') {
-    throw new Error(
-      `LLM_CHAIN's first link is '${firstLink.provider}:${firstLink.model}', but multi-provider routing is not wired yet — only 'openai' can lead the chain until the router lands`,
-    );
-  }
-  const model = firstLink.model;
-  const client = new OpenAI({
-    apiKey: config.get('OPENAI_API_KEY', { infer: true }),
-    timeout: config.get('ANSWER_TIMEOUT_MS', { infer: true }),
+// Every provider the chain can name and the base URL its client talks to.
+// Config validation already confirms LLM_CHAIN names only these providers
+// and that each one it uses has a key, so this map only needs an entry per
+// provider — it is not itself a source of validation.
+const BASE_URLS: Record<string, string> = {
+  openai: 'https://api.openai.com/v1',
+  openrouter: 'https://openrouter.ai/api/v1',
+};
+
+// Config validation already parsed and key-checked LLM_CHAIN at boot, so a
+// parse failure or a missing key here would mean that guarantee broke, not
+// that this value is unvalidated — this factory relies on both rather than
+// re-checking them.
+export function createLlmProvider(config: ConfigService<Env, true>): LlmRouter {
+  const links = parseLlmChain(config.get('LLM_CHAIN', { infer: true }));
+  const timeout = config.get('ANSWER_TIMEOUT_MS', { infer: true });
+
+  const keys: Record<string, string | undefined> = {
+    openai: config.get('OPENAI_API_KEY', { infer: true }),
+    openrouter: config.get('OPENROUTER_API_KEY', { infer: true }),
+  };
+
+  const providers = links.map((link) => {
+    const client = new OpenAI({
+      apiKey: keys[link.provider],
+      baseURL: BASE_URLS[link.provider],
+      timeout,
+    });
+
+    return new OpenAiCompatibleProvider(client, link.provider, link.model);
   });
 
-  new Logger('Llm').log(`answering with ${model}`);
+  const chainDescription = links
+    .map((link) => `${link.provider}:${link.model}`)
+    .join(' → ');
+  new Logger('Llm').log(`answering via ${chainDescription}`);
 
-  return new OpenAiCompatibleProvider(client, 'openai', model);
+  return new LlmRouter(providers);
 }
 
 @Global()
