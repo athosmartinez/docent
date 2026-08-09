@@ -4,7 +4,7 @@ import OpenAI from 'openai';
 
 import type { Env } from '../common/config/env.schema';
 import { parseLlmChain } from './llm-chain';
-import { LlmRouter } from './llm.router';
+import { LlmRouter, type RoutedLink } from './llm.router';
 import { LLM } from './llm.types';
 import { OpenAiCompatibleProvider } from './openai-compatible.provider';
 
@@ -30,14 +30,17 @@ export function createLlmProvider(config: ConfigService<Env, true>): LlmRouter {
     openrouter: config.get('OPENROUTER_API_KEY', { infer: true }),
   };
 
-  const providers = links.map((link) => {
+  const routed: RoutedLink[] = links.map((link) => {
     const client = new OpenAI({
       apiKey: keys[link.provider],
       baseURL: BASE_URLS[link.provider],
       timeout,
     });
 
-    return new OpenAiCompatibleProvider(client, link.provider, link.model);
+    return {
+      chain: link,
+      provider: new OpenAiCompatibleProvider(client, link.provider, link.model),
+    };
   });
 
   const chainDescription = links
@@ -45,7 +48,7 @@ export function createLlmProvider(config: ConfigService<Env, true>): LlmRouter {
     .join(' → ');
   new Logger('Llm').log(`answering via ${chainDescription}`);
 
-  return new LlmRouter(providers);
+  return new LlmRouter(routed);
 }
 
 @Global()

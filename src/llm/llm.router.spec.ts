@@ -1,4 +1,4 @@
-import { LlmRouter } from './llm.router';
+import { LlmRouter, type RoutedLink } from './llm.router';
 import type { CompletionResult, LlmProvider, LlmStream } from './llm.types';
 
 const request = { system: 's', user: 'u' };
@@ -20,7 +20,6 @@ function link(
   behaviour: { fails?: Error; deltas?: string[]; failsAfter?: number },
 ): LlmProvider {
   return {
-    providerName: provider,
     complete: () =>
       behaviour.fails
         ? Promise.reject(behaviour.fails)
@@ -57,9 +56,25 @@ function link(
   };
 }
 
+// Pairs a fake link with the chain identity the router is constructed
+// with — the only source it now has for attributing a failure, since
+// LlmProvider itself carries no name.
+function entry(
+  provider: string,
+  behaviour: { fails?: Error; deltas?: string[]; failsAfter?: number },
+): RoutedLink {
+  return {
+    chain: { provider, model: 'm' },
+    provider: link(provider, behaviour),
+  };
+}
+
 describe('LlmRouter', () => {
   it('answers from the first link when it works', async () => {
-    const router = new LlmRouter([link('openai', {}), link('openrouter', {})]);
+    const router = new LlmRouter([
+      entry('openai', {}),
+      entry('openrouter', {}),
+    ]);
 
     const completion = await router.complete(request);
 
@@ -72,8 +87,8 @@ describe('LlmRouter', () => {
   // with a different key, so falling through is precisely the point.
   it('falls through on an authentication failure', async () => {
     const router = new LlmRouter([
-      link('openai', { fails: new Error('401 Incorrect API key') }),
-      link('openrouter', {}),
+      entry('openai', { fails: new Error('401 Incorrect API key') }),
+      entry('openrouter', {}),
     ]);
 
     const completion = await router.complete(request);
@@ -84,9 +99,9 @@ describe('LlmRouter', () => {
   });
 
   it('tries each link at most once and reports every reason when all fail', async () => {
-    const first = link('openai', { fails: new Error('boom one') });
-    const second = link('openrouter', { fails: new Error('boom two') });
-    const completeFirst = jest.spyOn(first, 'complete');
+    const first = entry('openai', { fails: new Error('boom one') });
+    const second = entry('openrouter', { fails: new Error('boom two') });
+    const completeFirst = jest.spyOn(first.provider, 'complete');
 
     const router = new LlmRouter([first, second]);
 
@@ -101,8 +116,8 @@ describe('LlmRouter', () => {
   // would hand the caller a stream that is already doomed.
   it('switches links when the first delta never arrives', async () => {
     const router = new LlmRouter([
-      link('openai', { fails: new Error('dropped'), failsAfter: 0 }),
-      link('openrouter', { deltas: ['x', 'y'] }),
+      entry('openai', { fails: new Error('dropped'), failsAfter: 0 }),
+      entry('openrouter', { deltas: ['x', 'y'] }),
     ]);
 
     const stream = router.stream(request);
@@ -114,7 +129,7 @@ describe('LlmRouter', () => {
   });
 
   it('does not lose the peeked delta', async () => {
-    const router = new LlmRouter([link('openai', { deltas: ['first', '!'] })]);
+    const router = new LlmRouter([entry('openai', { deltas: ['first', '!'] })]);
 
     const received: string[] = [];
     for await (const delta of router.stream(request)) received.push(delta);
@@ -126,12 +141,12 @@ describe('LlmRouter', () => {
   // silent switch would splice two different answers together.
   it('propagates a failure that lands after the first delta', async () => {
     const router = new LlmRouter([
-      link('openai', {
+      entry('openai', {
         deltas: ['a', 'b'],
         fails: new Error('mid'),
         failsAfter: 1,
       }),
-      link('openrouter', {}),
+      entry('openrouter', {}),
     ]);
 
     const received: string[] = [];
@@ -150,7 +165,6 @@ describe('LlmRouter', () => {
   it('closes an abandoned link stream when the caller stops iterating early', async () => {
     let closed = false;
     const abandonable: LlmProvider = {
-      providerName: 'openai',
       complete: () => Promise.reject(new Error('unused')),
       stream: (): LlmStream => {
         async function* tokens(): AsyncGenerator<string> {
@@ -177,7 +191,9 @@ describe('LlmRouter', () => {
       },
     };
 
-    const router = new LlmRouter([abandonable]);
+    const router = new LlmRouter([
+      { chain: { provider: 'openai', model: 'm' }, provider: abandonable },
+    ]);
 
     for await (const delta of router.stream(request)) {
       void delta;
@@ -193,8 +209,8 @@ describe('LlmRouter', () => {
   // decision the provider already made, not a transient fault.
   it('does not fall through to a healthy link when the first ends with zero deltas', async () => {
     const router = new LlmRouter([
-      link('openai', { deltas: [] }),
-      link('openrouter', { deltas: ['should', 'not', 'be', 'used'] }),
+      entry('openai', { deltas: [] }),
+      entry('openrouter', { deltas: ['should', 'not', 'be', 'used'] }),
     ]);
 
     const stream = router.stream(request);
@@ -210,7 +226,7 @@ describe('LlmRouter', () => {
   // "every link failed", both of which are real states a caller can observe
   // by reading outcome() at the wrong time.
   it('reports a distinguishable state before any attempt has been made', () => {
-    const router = new LlmRouter([link('openai', {})]);
+    const router = new LlmRouter([entry('openai', {})]);
     const stream = router.stream(request);
 
     expect(stream.outcome().modelReason).not.toBe('primary');
@@ -219,8 +235,8 @@ describe('LlmRouter', () => {
 
   it('reports a state distinct from "not started" when every link fails', async () => {
     const router = new LlmRouter([
-      link('openai', { fails: new Error('boom one'), failsAfter: 0 }),
-      link('openrouter', { fails: new Error('boom two'), failsAfter: 0 }),
+      entry('openai', { fails: new Error('boom one'), failsAfter: 0 }),
+      entry('openrouter', { fails: new Error('boom two'), failsAfter: 0 }),
     ]);
     const stream = router.stream(request);
     const notStarted = stream.outcome().modelReason;
@@ -236,10 +252,10 @@ describe('LlmRouter', () => {
     expect(afterExhaustion).not.toBe(notStarted);
   });
 
-  it('attributes a stream failure to the link that produced it', async () => {
+  it('attributes a stream failure to the link it was constructed with', async () => {
     const router = new LlmRouter([
-      link('openai', { fails: new Error('dropped'), failsAfter: 0 }),
-      link('openrouter', { fails: new Error('also dropped'), failsAfter: 0 }),
+      entry('openai', { fails: new Error('dropped'), failsAfter: 0 }),
+      entry('openrouter', { fails: new Error('also dropped'), failsAfter: 0 }),
     ]);
 
     await expect(
@@ -249,14 +265,30 @@ describe('LlmRouter', () => {
     ).rejects.toThrow(/openai: dropped[\s\S]*openrouter: also dropped/);
   });
 
-  it('attributes a complete() failure to the link that produced it', async () => {
+  it('attributes a complete() failure to the link it was constructed with', async () => {
     const router = new LlmRouter([
-      link('openai', { fails: new Error('401 Incorrect API key') }),
-      link('openrouter', { fails: new Error('429 rate limited') }),
+      entry('openai', { fails: new Error('401 Incorrect API key') }),
+      entry('openrouter', { fails: new Error('429 rate limited') }),
     ]);
 
     await expect(router.complete(request)).rejects.toThrow(
       /openai: 401 Incorrect API key[\s\S]*openrouter: 429 rate limited/,
     );
+  });
+
+  // Attribution reads only the chain identity a link was constructed with —
+  // never anything derived from the provider object itself, which no longer
+  // carries a name at all. Pairing a link with a mismatched identity proves
+  // that: the reported name follows the pairing, not the object's own
+  // behaviour.
+  it('attributes a failure using the paired identity, not anything read off the provider', async () => {
+    const router = new LlmRouter([
+      {
+        chain: { provider: 'openrouter', model: 'm' },
+        provider: link('openai', { fails: new Error('boom') }),
+      },
+    ]);
+
+    await expect(router.complete(request)).rejects.toThrow(/openrouter: boom/);
   });
 });

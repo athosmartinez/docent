@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import { describeError } from '../common/describe-error';
+import type { ChainLink } from './llm-chain';
 import type {
   CompletionRequest,
   CompletionResult,
@@ -9,19 +10,33 @@ import type {
   StreamOutcome,
 } from './llm.types';
 
+/**
+ * A link paired with the chain entry it was built from. Identity lives here,
+ * not on LlmProvider: the interface answers "can this complete a request",
+ * and who a link *is* is context the router needs about the object it was
+ * handed, not part of what the object itself promises. Attributing a
+ * rejection to the wrong link — or to no link at all — is worse than the
+ * `unknown` a missing/optional name would silently produce, so there is no
+ * fallback: a link with no identity cannot be constructed.
+ */
+export interface RoutedLink {
+  readonly chain: ChainLink;
+  readonly provider: LlmProvider;
+}
+
 @Injectable()
 export class LlmRouter implements LlmProvider {
-  constructor(private readonly links: LlmProvider[]) {}
+  constructor(private readonly links: RoutedLink[]) {}
 
   async complete(request: CompletionRequest): Promise<CompletionResult> {
     const failures: string[] = [];
 
-    for (const link of this.links) {
+    for (const { chain, provider } of this.links) {
       try {
-        const completion = await link.complete(request);
+        const completion = await provider.complete(request);
         return { ...completion, modelReason: reasonFor(failures) };
       } catch (error: unknown) {
-        failures.push(`${nameOf(link)}: ${describeError(error)}`);
+        failures.push(`${chain.provider}: ${describeError(error)}`);
       }
     }
 
@@ -54,20 +69,15 @@ export class LlmRouter implements LlmProvider {
     async function* deltas(): AsyncGenerator<string> {
       const failures: string[] = [];
 
-      for (const link of links) {
-        const candidate = link.stream(request);
+      for (const { chain, provider } of links) {
+        const candidate = provider.stream(request);
         const iterator = candidate[Symbol.asyncIterator]();
 
         let first;
         try {
           first = await iterator.next();
         } catch (error: unknown) {
-          // candidate.outcome() is available regardless of whether the
-          // iterator ever produced a value — the provider/model it reports
-          // are bound when the stream was opened, not once it succeeds.
-          failures.push(
-            `${candidate.outcome().provider}: ${describeError(error)}`,
-          );
+          failures.push(`${chain.provider}: ${describeError(error)}`);
           continue;
         }
 
@@ -127,8 +137,4 @@ function reasonFor(failures: string[]): string {
   return failures.length === 0
     ? 'primary'
     : `fallback: ${failures[failures.length - 1] ?? 'unknown'}`;
-}
-
-function nameOf(link: LlmProvider): string {
-  return link.providerName ?? 'unknown';
 }
