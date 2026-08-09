@@ -491,4 +491,60 @@ describe('LlmRouter', () => {
 
     expect(returnCalls).toBe(1);
   });
+
+  // The pairing is the only source of a link's identity. Reading it off the
+  // provider object instead compiles, and every assertion about the message's
+  // content still passes — so the fixture deliberately disagrees with itself,
+  // and only the source can explain which name comes out.
+  it('attributes a stream failure using the paired identity, not anything read off the provider', async () => {
+    const router = new LlmRouter([
+      {
+        chain: { provider: 'openrouter', model: 'm' },
+        provider: link('openai', { fails: new Error('boom') }),
+      },
+    ]);
+
+    await expect(
+      (async () => {
+        for await (const delta of router.stream(request)) void delta;
+      })(),
+    ).rejects.toThrow(/openrouter: boom/);
+  });
+
+  // A bound proven only to exist is not proven to be useful. Every test above
+  // passes with the timeout set to zero, which would drop a link whose
+  // teardown legitimately takes a moment instead of waiting for it — leaving
+  // the connection open, which is the leak the close exists to prevent. This
+  // pins that a close settling well inside the bound is actually awaited.
+  it('waits for a close that settles inside the bound', async () => {
+    let closed = false;
+
+    async function* tokens(): AsyncGenerator<string> {
+      await Promise.resolve();
+      yield 'a';
+    }
+
+    const provider: LlmProvider = {
+      complete: () => Promise.reject(new Error('unused')),
+      stream: () =>
+        withCustomClose(
+          tokens(),
+          () =>
+            new Promise<IteratorResult<string>>((resolve) => {
+              setTimeout(() => {
+                closed = true;
+                resolve({ value: undefined, done: true });
+              }, 50);
+            }),
+        ),
+    };
+
+    const router = new LlmRouter([
+      { chain: { provider: 'openai', model: 'm' }, provider },
+    ]);
+
+    for await (const delta of router.stream(request)) void delta;
+
+    expect(closed).toBe(true);
+  });
 });
