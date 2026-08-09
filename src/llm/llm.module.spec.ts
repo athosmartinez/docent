@@ -1,9 +1,21 @@
 import type { ConfigService } from '@nestjs/config';
+import OpenAI from 'openai';
 
 import type { Env } from '../common/config/env.schema';
 import { createLlmProvider } from './llm.module';
 import { LlmRouter } from './llm.router';
-import type { OpenAiCompatibleProvider } from './openai-compatible.provider';
+import { OpenAiCompatibleProvider } from './openai-compatible.provider';
+
+// Mocked rather than reached into via a private-field cast: this asserts
+// what the factory is actually responsible for — the exact arguments it
+// hands its collaborators — and keeps working if LlmRouter's internal
+// storage of its links is ever renamed.
+jest.mock('openai');
+jest.mock('./openai-compatible.provider');
+
+const MockOpenAI = OpenAI as jest.MockedClass<typeof OpenAI>;
+const MockOpenAiCompatibleProvider =
+  OpenAiCompatibleProvider as jest.MockedClass<typeof OpenAiCompatibleProvider>;
 
 function fakeConfig(env: Partial<Env>): ConfigService<Env, true> {
   return {
@@ -11,23 +23,10 @@ function fakeConfig(env: Partial<Env>): ConfigService<Env, true> {
   } as unknown as ConfigService<Env, true>;
 }
 
-// The router holds its links privately; reaching in here is the only way to
-// assert per-link wiring (base URL, key, model) without giving the router
-// itself a test-only accessor it has no production need for.
-function linksOf(router: LlmRouter): OpenAiCompatibleProvider[] {
-  return (router as unknown as { links: OpenAiCompatibleProvider[] }).links;
-}
-
-function clientOf(provider: OpenAiCompatibleProvider): {
-  apiKey: string;
-  baseURL: string;
-} {
-  return (
-    provider as unknown as {
-      client: { apiKey: string; baseURL: string };
-    }
-  ).client;
-}
+beforeEach(() => {
+  MockOpenAI.mockClear();
+  MockOpenAiCompatibleProvider.mockClear();
+});
 
 describe('createLlmProvider', () => {
   it('builds a router with one provider for the single-link openai default', () => {
@@ -40,33 +39,62 @@ describe('createLlmProvider', () => {
     );
 
     expect(router).toBeInstanceOf(LlmRouter);
-    const links = linksOf(router);
-    expect(links).toHaveLength(1);
-    expect(clientOf(links[0]!).baseURL).toBe('https://api.openai.com/v1');
-    expect(clientOf(links[0]!).apiKey).toBe('sk-test');
+
+    expect(MockOpenAI).toHaveBeenCalledTimes(1);
+    expect(MockOpenAI).toHaveBeenCalledWith({
+      apiKey: 'sk-test',
+      baseURL: 'https://api.openai.com/v1',
+      timeout: 60_000,
+    });
+
+    expect(MockOpenAiCompatibleProvider).toHaveBeenCalledTimes(1);
+    expect(MockOpenAiCompatibleProvider).toHaveBeenCalledWith(
+      MockOpenAI.mock.instances[0],
+      'openai',
+      'gpt-4.1-mini',
+    );
   });
 
   // The whole point of the router is that a chain can lead with a provider
   // other than openai — this is the case the pre-router factory refused.
-  it('builds one provider per link, in chain order, with the right base URL and key for each', () => {
-    const router = createLlmProvider(
+  // Distinct keys and models per link catch a client built for the wrong
+  // provider (wrong base URL/key) or a provider built with the wrong link's
+  // model, either of which would silently misroute or mis-bill in
+  // production.
+  it('builds one provider per link, in chain order, with the right base URL, key, model and timeout for each', () => {
+    createLlmProvider(
       fakeConfig({
         LLM_CHAIN: 'openrouter:google/gemini-2.5-flash,openai:gpt-4.1-mini',
         OPENAI_API_KEY: 'sk-openai',
         OPENROUTER_API_KEY: 'sk-openrouter',
-        ANSWER_TIMEOUT_MS: 60_000,
+        ANSWER_TIMEOUT_MS: 45_000,
       }),
     );
 
-    const links = linksOf(router);
-    expect(links).toHaveLength(2);
+    expect(MockOpenAI).toHaveBeenCalledTimes(2);
+    expect(MockOpenAI).toHaveBeenNthCalledWith(1, {
+      apiKey: 'sk-openrouter',
+      baseURL: 'https://openrouter.ai/api/v1',
+      timeout: 45_000,
+    });
+    expect(MockOpenAI).toHaveBeenNthCalledWith(2, {
+      apiKey: 'sk-openai',
+      baseURL: 'https://api.openai.com/v1',
+      timeout: 45_000,
+    });
 
-    const first = clientOf(links[0]!);
-    expect(first.baseURL).toBe('https://openrouter.ai/api/v1');
-    expect(first.apiKey).toBe('sk-openrouter');
-
-    const second = clientOf(links[1]!);
-    expect(second.baseURL).toBe('https://api.openai.com/v1');
-    expect(second.apiKey).toBe('sk-openai');
+    expect(MockOpenAiCompatibleProvider).toHaveBeenCalledTimes(2);
+    expect(MockOpenAiCompatibleProvider).toHaveBeenNthCalledWith(
+      1,
+      MockOpenAI.mock.instances[0],
+      'openrouter',
+      'google/gemini-2.5-flash',
+    );
+    expect(MockOpenAiCompatibleProvider).toHaveBeenNthCalledWith(
+      2,
+      MockOpenAI.mock.instances[1],
+      'openai',
+      'gpt-4.1-mini',
+    );
   });
 });

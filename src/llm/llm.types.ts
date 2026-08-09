@@ -58,6 +58,15 @@ export interface LlmStream extends AsyncIterable<string> {
  * rather than the call sites.
  */
 export interface LlmProvider {
+  /**
+   * The identifier this link answers under — 'openai', 'openrouter' — when
+   * the implementation has one. Optional because a rejected `complete()`
+   * carries no CompletionResult of its own to read a provider name from; a
+   * caller that needs to attribute the rejection to a link (the router) uses
+   * this instead, and falls back to a link-agnostic label when it is absent
+   * — a test double, or a future implementation that doesn't set it.
+   */
+  readonly providerName?: string;
   complete(request: CompletionRequest): Promise<CompletionResult>;
   stream(request: CompletionRequest): LlmStream;
 }

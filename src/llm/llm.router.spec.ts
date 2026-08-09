@@ -20,6 +20,7 @@ function link(
   behaviour: { fails?: Error; deltas?: string[]; failsAfter?: number },
 ): LlmProvider {
   return {
+    providerName: provider,
     complete: () =>
       behaviour.fails
         ? Promise.reject(behaviour.fails)
@@ -140,5 +141,122 @@ describe('LlmRouter', () => {
       })(),
     ).rejects.toThrow('mid');
     expect(received).toEqual(['a']);
+  });
+
+  // An SSE endpoint that stops iterating on client disconnect calls
+  // `.return()` on the router's generator, same as a `break`. If that isn't
+  // forwarded to the chosen link, its generator stays suspended inside the
+  // provider SDK's own `for await`, holding the response open indefinitely.
+  it('closes an abandoned link stream when the caller stops iterating early', async () => {
+    let closed = false;
+    const abandonable: LlmProvider = {
+      providerName: 'openai',
+      complete: () => Promise.reject(new Error('unused')),
+      stream: (): LlmStream => {
+        async function* tokens(): AsyncGenerator<string> {
+          try {
+            await Promise.resolve();
+            yield 'a';
+            yield 'b';
+          } finally {
+            closed = true;
+          }
+        }
+        const iterator = tokens();
+        return {
+          [Symbol.asyncIterator]: () => iterator,
+          outcome: () => ({
+            model: 'm',
+            provider: 'openai',
+            finishReason: 'stop',
+            usage: null,
+            reportedCostUsd: null,
+            modelReason: 'primary',
+          }),
+        };
+      },
+    };
+
+    const router = new LlmRouter([abandonable]);
+
+    for await (const delta of router.stream(request)) {
+      void delta;
+      break;
+    }
+
+    expect(closed).toBe(true);
+  });
+
+  // A stream that opens and ends with zero deltas is the provider answering
+  // with nothing — a content filter, an empty completion — not a failure to
+  // reach it. Retrying that against the next link would retry a content
+  // decision the provider already made, not a transient fault.
+  it('does not fall through to a healthy link when the first ends with zero deltas', async () => {
+    const router = new LlmRouter([
+      link('openai', { deltas: [] }),
+      link('openrouter', { deltas: ['should', 'not', 'be', 'used'] }),
+    ]);
+
+    const stream = router.stream(request);
+    const received: string[] = [];
+    for await (const delta of stream) received.push(delta);
+
+    expect(received).toEqual([]);
+    expect(stream.outcome().provider).toBe('openai');
+  });
+
+  // A cost ledger persists modelReason verbatim, so 'primary' must mean a
+  // link actually answered — never "nothing has happened yet" and never
+  // "every link failed", both of which are real states a caller can observe
+  // by reading outcome() at the wrong time.
+  it('reports a distinguishable state before any attempt has been made', () => {
+    const router = new LlmRouter([link('openai', {})]);
+    const stream = router.stream(request);
+
+    expect(stream.outcome().modelReason).not.toBe('primary');
+    expect(stream.outcome().provider).toBe('unknown');
+  });
+
+  it('reports a state distinct from "not started" when every link fails', async () => {
+    const router = new LlmRouter([
+      link('openai', { fails: new Error('boom one'), failsAfter: 0 }),
+      link('openrouter', { fails: new Error('boom two'), failsAfter: 0 }),
+    ]);
+    const stream = router.stream(request);
+    const notStarted = stream.outcome().modelReason;
+
+    await expect(
+      (async () => {
+        for await (const delta of stream) void delta;
+      })(),
+    ).rejects.toThrow(/boom one[\s\S]*boom two/);
+
+    const afterExhaustion = stream.outcome().modelReason;
+    expect(afterExhaustion).not.toBe('primary');
+    expect(afterExhaustion).not.toBe(notStarted);
+  });
+
+  it('attributes a stream failure to the link that produced it', async () => {
+    const router = new LlmRouter([
+      link('openai', { fails: new Error('dropped'), failsAfter: 0 }),
+      link('openrouter', { fails: new Error('also dropped'), failsAfter: 0 }),
+    ]);
+
+    await expect(
+      (async () => {
+        for await (const delta of router.stream(request)) void delta;
+      })(),
+    ).rejects.toThrow(/openai: dropped[\s\S]*openrouter: also dropped/);
+  });
+
+  it('attributes a complete() failure to the link that produced it', async () => {
+    const router = new LlmRouter([
+      link('openai', { fails: new Error('401 Incorrect API key') }),
+      link('openrouter', { fails: new Error('429 rate limited') }),
+    ]);
+
+    await expect(router.complete(request)).rejects.toThrow(
+      /openai: 401 Incorrect API key[\s\S]*openrouter: 429 rate limited/,
+    );
   });
 });

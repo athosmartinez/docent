@@ -37,7 +37,7 @@ function normaliseUsage(raw: RawUsage | undefined): TokenUsage | null {
 export class OpenAiCompatibleProvider implements LlmProvider {
   constructor(
     private readonly client: OpenAI,
-    private readonly providerName: string,
+    public readonly providerName: string,
     private readonly model: string,
   ) {}
 
