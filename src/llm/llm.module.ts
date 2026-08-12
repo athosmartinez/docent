@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 
 import type { Env } from '../common/config/env.schema';
+import { missingPrices } from '../cost/cost.calculator';
 import { parseLlmChain } from './llm-chain';
 import { LlmRouter, type RoutedLink } from './llm.router';
 import { LLM } from './llm.types';
@@ -46,7 +47,18 @@ export function createLlmProvider(config: ConfigService<Env, true>): LlmRouter {
   const chainDescription = links
     .map((link) => `${link.provider}:${link.model}`)
     .join(' → ');
-  new Logger('Llm').log(`answering via ${chainDescription}`);
+  const logger = new Logger('Llm');
+  logger.log(`answering via ${chainDescription}`);
+
+  // An unpriced link still answers questions; it just cannot be costed. A
+  // warning rather than a boot failure keeps adding a new model as easy as
+  // it should be — pricing it can follow once it is live.
+  const unpriced = missingPrices(links);
+  if (unpriced.length > 0) {
+    logger.warn(
+      `no price on file for ${unpriced.join(', ')}; their ledger rows will record cost_source: 'unknown'`,
+    );
+  }
 
   return new LlmRouter(routed);
 }
