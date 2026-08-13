@@ -108,19 +108,15 @@ export class AskController {
       }
 
       sse(res, 'done', { grounded: true });
-      // model/provider are recorded null here: the streaming API reports them
-      // per chunk rather than once, and threading them through is work M3
-      // redoes once a router names the provider that actually served the
-      // request. finishReason is read from the stream itself, after it has
-      // ended, so a completion truncated at the token limit is recorded as
-      // `length`, not silently reported as a clean `stop`.
+      // A chat completion API reports the model that answered, its finish
+      // reason, usage and cost only once the stream has ended — none of it
+      // is knowable before this point, so outcome() is read exactly once,
+      // here, rather than per chunk.
       await this.service.recordStreamed(
         question,
         chunks,
         answer,
-        null,
-        null,
-        stream.outcome().finishReason,
+        stream.outcome(),
       );
     } catch (error: unknown) {
       // The status line is long gone by now, so a failure can only be
