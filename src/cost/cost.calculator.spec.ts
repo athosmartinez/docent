@@ -81,6 +81,22 @@ describe('computeCost', () => {
       }),
     ).toEqual({ usdCost: null, costSource: 'unknown' });
   });
+
+  // promptTokens is contractually supposed to already contain cachedTokens,
+  // but nothing on the wire enforces that. A provider that reports more
+  // cached tokens than prompt tokens has contradicted its own contract, and
+  // the split cannot be trusted enough to price — this must not come back as
+  // a negative dollar figure labelled 'table'.
+  it('reports unknown, not a negative figure, when cachedTokens exceeds promptTokens', () => {
+    expect(
+      computeCost({
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        usage: { promptTokens: 100, cachedTokens: 150, completionTokens: 0 },
+        reportedCostUsd: null,
+      }),
+    ).toEqual({ usdCost: null, costSource: 'unknown' });
+  });
 });
 
 describe('missingPrices', () => {

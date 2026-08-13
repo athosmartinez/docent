@@ -42,6 +42,17 @@ export function computeCost(input: {
   // twice.
   const uncached = input.usage.promptTokens - input.usage.cachedTokens;
 
+  // TokenUsage's contract is that cachedTokens is already counted inside
+  // promptTokens, but nothing on the wire enforces that — a provider can
+  // send a pair that contradicts its own contract. Clamping the remainder to
+  // zero would silently trust a number we have no reason to trust; treating
+  // it as unpriced usage, the same as a missing price or missing usage, at
+  // least keeps a self-contradictory report out of a total that presents
+  // itself as measured.
+  if (uncached < 0) {
+    return { usdCost: null, costSource: 'unknown' };
+  }
+
   const usdCost =
     (uncached / PER_MILLION) * price.inputPerMillion +
     (input.usage.cachedTokens / PER_MILLION) * price.cachedInputPerMillion +
