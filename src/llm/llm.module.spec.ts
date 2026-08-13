@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 
@@ -95,6 +96,62 @@ describe('createLlmProvider', () => {
       MockOpenAI.mock.instances[1],
       'openai',
       'gpt-4.1-mini',
+    );
+  });
+});
+
+describe('createLlmProvider, an unpriced link in the chain', () => {
+  let warnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    warnSpy = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  // An unpriced model must still answer questions, so the check that finds
+  // it must warn without ever stopping boot. A test that only asserted "does
+  // not throw" would miss the check being deleted outright (no warning, no
+  // operator signal); one that only asserted "warns" would miss the warning
+  // being followed by a throw. Asserting both against the same call is what
+  // catches either mutation.
+  it('warns about the unpriced link and still returns a working router', () => {
+    let router: LlmRouter | undefined;
+
+    expect(() => {
+      router = createLlmProvider(
+        fakeConfig({
+          LLM_CHAIN: 'openai:gpt-4.1-mini,openrouter:not-in-the-table',
+          OPENAI_API_KEY: 'sk-openai',
+          OPENROUTER_API_KEY: 'sk-openrouter',
+          ANSWER_TIMEOUT_MS: 60_000,
+        }),
+      );
+    }).not.toThrow();
+
+    expect(router).toBeInstanceOf(LlmRouter);
+    expect(warnSpy).toHaveBeenCalled();
+  });
+
+  // "some links are unpriced" sends an operator hunting through the whole
+  // chain; the warning has to name the exact pair so they know which model
+  // to price without cross-referencing LLM_CHAIN themselves.
+  it('names the unpriced provider:model pair in the warning', () => {
+    createLlmProvider(
+      fakeConfig({
+        LLM_CHAIN: 'openai:gpt-4.1-mini,openrouter:not-in-the-table',
+        OPENAI_API_KEY: 'sk-openai',
+        OPENROUTER_API_KEY: 'sk-openrouter',
+        ANSWER_TIMEOUT_MS: 60_000,
+      }),
+    );
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('openrouter:not-in-the-table'),
     );
   });
 });
