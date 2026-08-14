@@ -4,6 +4,7 @@ import { AppConfigModule } from './common/config/config.module';
 import { DatabaseModule } from './common/database/database.module';
 import { RedisModule } from './common/redis/redis.module';
 import { AskModule } from './ask/ask.module';
+import { CostModule } from './cost/cost.module';
 import { EmbeddingsModule } from './embeddings/embeddings.module';
 import { HealthModule } from './health/health.module';
 import { IngestionModule } from './ingestion/ingestion.module';
@@ -16,6 +17,7 @@ import { RetrievalModule } from './retrieval/retrieval.module';
     DatabaseModule,
     RedisModule,
     AskModule,
+    CostModule,
     EmbeddingsModule,
     HealthModule,
     IngestionModule,
