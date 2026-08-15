@@ -55,6 +55,13 @@ export const envSchema = z
       .int()
       .positive()
       .default(2_592_000),
+    // Also bounds memory only, in the same sense as CACHE_EMBEDDING_TTL_S,
+    // for a source added or removed: the key already carries the corpus
+    // version, so either always invalidates the entry by changing its key.
+    // Re-ingesting an existing source does too only when its refreshed
+    // timestamp becomes the newest among ready sources — this TTL is the
+    // backstop for the cases it doesn't. Seven days.
+    CACHE_ANSWER_TTL_S: z.coerce.number().int().positive().default(604_800),
   })
   .refine((env) => env.EMBEDDING_DIMENSIONS === CHUNK_EMBEDDING_DIMENSIONS, {
     message: `must be ${CHUNK_EMBEDDING_DIMENSIONS}, the dimensionality the chunks column declares`,

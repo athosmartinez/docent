@@ -31,6 +31,25 @@ export function embeddingKey(
 }
 
 /**
+ * Namespaced under the corpus version an answer was produced against —
+ * carried in the key itself, not hashed away — so adding or removing a
+ * ready source always invalidates every cached answer at once, by changing
+ * the key every one of them was stored under: CorpusVersion's count term
+ * moves unconditionally either way. Re-ingesting an existing source
+ * invalidates them too only when its refreshed timestamp becomes the newest
+ * among ready sources — the common case, but not guaranteed if another
+ * ready source already carries a later one. In that case the version
+ * string, and so the key, is unchanged, and the pre-re-ingest entry is
+ * served again until CACHE_ANSWER_TTL_S expires it — this key scheme
+ * invalidates by making a changed corpus compute a different key, not by
+ * guaranteeing every change does. Nothing has to walk Redis and delete
+ * anything for the cases it does cover.
+ */
+export function answerKey(version: string, question: string): string {
+  return `ans:${version}:${sha256(normaliseQuestion(question))}`;
+}
+
+/**
  * pgvector stores a `vector` column as 4-byte floats, so narrowing to
  * Float32Array before encoding discards only precision the database would
  * have discarded on write anyway — this is not a space/accuracy trade-off,

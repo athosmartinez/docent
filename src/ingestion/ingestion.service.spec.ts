@@ -36,6 +36,7 @@ describe('IngestionService reuse ordering', () => {
 
     const repository: Partial<IngestionRepository> = {
       findSourceByUri: () => Promise.resolve(source),
+      databaseNow: () => Promise.resolve(new Date()),
       claimForProcessing: () => {
         calls.push('claimForProcessing');
 
@@ -74,6 +75,7 @@ describe('IngestionService.ingestInline', () => {
 
     const repository: Partial<IngestionRepository> = {
       findSourceByUri: () => Promise.resolve(source),
+      databaseNow: () => Promise.resolve(new Date()),
       claimForProcessing: () => {
         calls.push('claimForProcessing');
 
@@ -113,6 +115,7 @@ describe('IngestionService.ingestInline', () => {
 
     const repository: Partial<IngestionRepository> = {
       findSourceByUri: () => Promise.resolve(source),
+      databaseNow: () => Promise.resolve(new Date()),
       claimForProcessing: () => Promise.resolve(undefined),
     };
 

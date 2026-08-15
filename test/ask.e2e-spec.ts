@@ -3,10 +3,12 @@ import type { TestingModuleBuilder } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { Kysely, sql } from 'kysely';
 import request from 'supertest';
+import { randomUUID } from 'node:crypto';
 import type { Server } from 'node:http';
 import { Readable } from 'node:stream';
 
 import { AppModule } from '../src/app.module';
+import { CorpusVersion } from '../src/common/cache/corpus-version';
 import { KYSELY } from '../src/common/database/database.module';
 import { CHUNK_EMBEDDING_DIMENSIONS } from '../src/common/database/schema';
 import type { DB } from '../src/common/database/schema';
@@ -14,6 +16,7 @@ import {
   EMBEDDINGS,
   type EmbeddingsProvider,
 } from '../src/embeddings/embeddings.types';
+import { IngestionRepository } from '../src/ingestion/ingestion.repository';
 import {
   LLM,
   type CompletionRequest,
@@ -101,6 +104,39 @@ function askTestingModule(): TestingModuleBuilder {
     .useValue(stubEmbeddings)
     .overrideProvider('RETRIEVAL_TOP_K')
     .useValue(1);
+}
+
+/**
+ * A stand-in for `CorpusVersion`, scoped to nothing but this test's own
+ * in-memory state. The real class derives from `sources` — a table several
+ * other e2e suites insert into, delete from and flip the status of while
+ * this suite runs — so two HTTP requests moments apart in the same test can
+ * observe two different corpora for a reason that has nothing to do with
+ * what the test is trying to prove: whether the *same* question, asked
+ * twice, lands on the *same* cache key. `CorpusVersion`'s own derivation
+ * from Postgres — that it changes exactly when a `ready` source is added,
+ * removed or touched — is proven on its own, isolated from that same
+ * contention, in `corpus-version.e2e-spec.ts`. What these tests need from it
+ * is only that `AskService` asks it fresh on every call rather than holding
+ * a stale value, which a version this suite controls directly demonstrates
+ * without depending on anything another suite touches.
+ */
+// `implements Pick<CorpusVersion, 'current'>` is the point, not decoration:
+// `overrideProvider(...).useValue(...)` takes `any`, so nothing else would
+// notice `current()`'s signature drifting from the real class — this fake
+// would keep compiling and these tests would keep passing against a shape
+// CorpusVersion no longer has.
+class FakeCorpusVersion implements Pick<CorpusVersion, 'current'> {
+  private version = `fake-corpus-version-${randomUUID()}`;
+
+  current(): Promise<string> {
+    return Promise.resolve(this.version);
+  }
+
+  /** Simulates what a real corpus change does to `CorpusVersion.current()`. */
+  bump(): void {
+    this.version = `fake-corpus-version-${randomUUID()}`;
+  }
 }
 
 describe('ask', () => {
@@ -216,9 +252,16 @@ describe('ask', () => {
   });
 
   it('streams citations before the first token', async () => {
+    // A question distinct from every other in this file: this test wants a
+    // genuine live stream (multiple deltas from stubLlm.stream, not the
+    // single cached frame a hit would produce), which only a guaranteed
+    // cache miss can demonstrate — the shape of a cache hit's SSE response
+    // is covered separately, on purpose, below.
+    const question = `what does unmistakablemarker do, live stream ${randomUUID()}?`;
+
     const response = await request(app.getHttpServer())
       .post('/ask/stream')
-      .send({ question: 'what does unmistakablemarker do?' })
+      .send({ question })
       .expect(200)
       .expect('content-type', /text\/event-stream/);
 
@@ -253,10 +296,17 @@ describe('ask', () => {
       ungrounded.createNestApplication<INestApplication<Server>>();
     await listenOnEphemeralPort(ungroundedApp);
 
+    // A question no earlier test in this file has asked: the answer cache is
+    // keyed only on the question and the corpus version, not on this app's
+    // one-off GROUNDING_MAX_DISTANCE override, so reusing a question another
+    // test already got a grounded answer for would serve that cached answer
+    // here regardless of the override — never reaching retrieval at all.
+    const question = `what does unmistakablemarker do, sse refusal ${randomUUID()}?`;
+
     try {
       const response = await request(ungroundedApp.getHttpServer())
         .post('/ask/stream')
-        .send({ question: 'what does unmistakablemarker do?' })
+        .send({ question })
         .expect(200)
         .expect('content-type', /text\/event-stream/);
 
@@ -292,10 +342,15 @@ describe('ask', () => {
       failing.createNestApplication<INestApplication<Server>>();
     await listenOnEphemeralPort(failingApp);
 
+    // Distinct from every other question in this file, for the same reason
+    // as the SSE-refusal test above: a cache hit would short-circuit before
+    // this app's exploding stream override is ever reached.
+    const question = `what does unmistakablemarker do, mid-stream failure ${randomUUID()}?`;
+
     try {
       const response = await request(failingApp.getHttpServer())
         .post('/ask/stream')
-        .send({ question: 'what does unmistakablemarker do?' })
+        .send({ question })
         .expect(200)
         .expect('content-type', /text\/event-stream/);
 
@@ -341,10 +396,15 @@ describe('ask', () => {
       failing.createNestApplication<INestApplication<Server>>();
     await listenOnEphemeralPort(failingApp);
 
+    // Distinct from every other question in this file, for the same reason
+    // as the two SSE tests above: a cache hit would short-circuit before
+    // this app's rejecting `complete()` override is ever reached.
+    const question = `what does unmistakablemarker do, 503 on failure ${randomUUID()}?`;
+
     try {
       const response = await request(failingApp.getHttpServer())
         .post('/ask')
-        .send({ question: 'what does unmistakablemarker do?' })
+        .send({ question })
         .expect(503);
 
       // The upstream error's own text (which could carry an internal host
@@ -490,6 +550,356 @@ describe('ask', () => {
       expect(citations).toHaveLength(0);
     } finally {
       await ungroundedApp.close();
+    }
+  });
+
+  it('serves a repeated question from cache, calling the model only once, and records the second hit as cached with zero cost', async () => {
+    let completeCalls = 0;
+    const countingLlm: LlmProvider = {
+      complete: (request: CompletionRequest) => {
+        completeCalls += 1;
+        return stubLlm.complete(request);
+      },
+      stream: (request: CompletionRequest) => stubLlm.stream(request),
+    };
+
+    const counting = await askTestingModule()
+      .overrideProvider(LLM)
+      .useValue(countingLlm)
+      .overrideProvider(CorpusVersion)
+      .useValue(new FakeCorpusVersion())
+      .compile();
+
+    const countingApp =
+      counting.createNestApplication<INestApplication<Server>>();
+    await listenOnEphemeralPort(countingApp);
+
+    // A random suffix per run: Redis persists across runs of this suite (the
+    // answer cache is not flushed between them), so a fixed question text
+    // would already be a hit on a second run and never exercise the "first
+    // request is a genuine miss" half of this test.
+    const question = `what does unmistakablemarker do, cache test ${randomUUID()}?`;
+
+    try {
+      const first = await request(countingApp.getHttpServer())
+        .post('/ask')
+        .send({ question })
+        .expect(200);
+      const second = await request(countingApp.getHttpServer())
+        .post('/ask')
+        .send({ question })
+        .expect(200);
+
+      expect(completeCalls).toBe(1);
+      expect(second.body).toEqual(first.body);
+
+      const rows = await db
+        .selectFrom('cost_ledger')
+        .innerJoin('queries', 'queries.id', 'cost_ledger.query_id')
+        .select(['cost_ledger.cost_source', 'cost_ledger.usd_cost'])
+        .where('queries.question', '=', question)
+        .orderBy('cost_ledger.created_at')
+        .execute();
+
+      expect(rows).toHaveLength(2);
+      expect(rows[0]?.cost_source).not.toBe('cached');
+      expect(rows[1]?.cost_source).toBe('cached');
+      expect(Number(rows[1]?.usd_cost)).toBe(0);
+    } finally {
+      await countingApp.close();
+    }
+  });
+
+  it('invalidates the cache when the corpus changes, so the next identical question misses again', async () => {
+    let completeCalls = 0;
+    const countingLlm: LlmProvider = {
+      complete: (request: CompletionRequest) => {
+        completeCalls += 1;
+        return stubLlm.complete(request);
+      },
+      stream: (request: CompletionRequest) => stubLlm.stream(request),
+    };
+
+    // Owned directly (rather than reached through the app's DI container)
+    // so this test can bump it deliberately between calls, the same way a
+    // real ready-source insert changes what the real CorpusVersion.current()
+    // returns — that a real insert actually does so is proven on its own,
+    // isolated from other suites' concurrent writes to `sources`, in
+    // corpus-version.e2e-spec.ts. What this test proves is the other half:
+    // that AskService asks for the version fresh on every request instead of
+    // holding the value from an earlier one, which a version this test
+    // controls demonstrates deterministically, without depending on the
+    // timing of a write to a table several other suites are also writing to.
+    const fakeCorpusVersion = new FakeCorpusVersion();
+
+    const counting = await askTestingModule()
+      .overrideProvider(LLM)
+      .useValue(countingLlm)
+      .overrideProvider(CorpusVersion)
+      .useValue(fakeCorpusVersion)
+      .compile();
+
+    const countingApp =
+      counting.createNestApplication<INestApplication<Server>>();
+    await listenOnEphemeralPort(countingApp);
+
+    const question = `what does unmistakablemarker do, invalidation test ${randomUUID()}?`;
+
+    try {
+      await request(countingApp.getHttpServer())
+        .post('/ask')
+        .send({ question })
+        .expect(200);
+      expect(completeCalls).toBe(1);
+
+      // Repeats cleanly from cache while the corpus hasn't changed.
+      await request(countingApp.getHttpServer())
+        .post('/ask')
+        .send({ question })
+        .expect(200);
+      expect(completeCalls).toBe(1);
+
+      fakeCorpusVersion.bump();
+
+      await request(countingApp.getHttpServer())
+        .post('/ask')
+        .send({ question })
+        .expect(200);
+      expect(completeCalls).toBe(2);
+    } finally {
+      await countingApp.close();
+    }
+  });
+
+  // The test above proves AskService's wiring — that it asks for the
+  // version fresh on every request — against a version it controls
+  // directly. corpus-version.e2e-spec.ts proves, in isolation, that a real
+  // Postgres write actually moves CorpusVersion.current(). Neither proves
+  // the two are connected: that a real ingestion write, through the real
+  // repository methods a pipeline actually calls, changes the real
+  // CorpusVersion.current(), and that AskService reading the real one then
+  // misses. This test is the missing link — no CorpusVersion override, a
+  // real IngestionRepository.createSource()+markReady() call standing in
+  // for what a completed ingestion run does.
+  //
+  // Safe under the shared database because it asserts only change ⇒ miss:
+  // a sibling suite committing its own `ready` row in the gap can only also
+  // change the version, which reinforces the expected second miss — it can
+  // produce a spurious pass, never a spurious failure. The complementary
+  // direction (stability ⇒ hit) is already covered by the fake-based tests
+  // above, which is what makes asserting only one direction here sufficient
+  // rather than a gap of its own.
+  it('a real ingestion write invalidates the cache through the real CorpusVersion, not a double standing in for it', async () => {
+    let completeCalls = 0;
+    const countingLlm: LlmProvider = {
+      complete: (request: CompletionRequest) => {
+        completeCalls += 1;
+        return stubLlm.complete(request);
+      },
+      stream: (request: CompletionRequest) => stubLlm.stream(request),
+    };
+
+    // No CorpusVersion override: this app's cache reads and writes go
+    // through the real class, querying the real `sources` table.
+    const counting = await askTestingModule()
+      .overrideProvider(LLM)
+      .useValue(countingLlm)
+      .compile();
+
+    const countingApp =
+      counting.createNestApplication<INestApplication<Server>>();
+    await listenOnEphemeralPort(countingApp);
+
+    const ingestionRepository = countingApp.get(IngestionRepository);
+    const question = `what does unmistakablemarker do, real chain test ${randomUUID()}?`;
+    // Unique to this test, so its own cleanup below can never touch a row
+    // another suite created.
+    const uri = `ask-e2e-real-chain-${randomUUID()}`;
+    let sourceId: string | undefined;
+
+    try {
+      await request(countingApp.getHttpServer())
+        .post('/ask')
+        .send({ question })
+        .expect(200);
+      expect(completeCalls).toBe(1);
+
+      // The real write path a completed ingestion run takes: create the row,
+      // then mark it ready — the same two repository calls IngestionService
+      // itself makes, not a raw insert standing in for them.
+      sourceId = await ingestionRepository.createSource(uri, 'docs');
+      await ingestionRepository.markReady(sourceId);
+
+      await request(countingApp.getHttpServer())
+        .post('/ask')
+        .send({ question })
+        .expect(200);
+      expect(completeCalls).toBe(2);
+    } finally {
+      if (sourceId) {
+        await db.deleteFrom('sources').where('id', '=', sourceId).execute();
+      }
+      await countingApp.close();
+    }
+  });
+
+  it('a question cached via /ask is also served from cache via /ask/stream, and vice versa', async () => {
+    let completeCalls = 0;
+    let streamCalls = 0;
+    const countingLlm: LlmProvider = {
+      complete: (request: CompletionRequest) => {
+        completeCalls += 1;
+        return stubLlm.complete(request);
+      },
+      stream: (request: CompletionRequest) => {
+        streamCalls += 1;
+        return stubLlm.stream(request);
+      },
+    };
+
+    const twins = await askTestingModule()
+      .overrideProvider(LLM)
+      .useValue(countingLlm)
+      .overrideProvider(CorpusVersion)
+      .useValue(new FakeCorpusVersion())
+      .compile();
+
+    const twinsApp = twins.createNestApplication<INestApplication<Server>>();
+    await listenOnEphemeralPort(twinsApp);
+
+    const question = `what does unmistakablemarker do, twin cache test ${randomUUID()}?`;
+
+    try {
+      // Populated via the JSON endpoint...
+      await request(twinsApp.getHttpServer())
+        .post('/ask')
+        .send({ question })
+        .expect(200);
+      expect(completeCalls).toBe(1);
+
+      // ...served from cache via the streaming endpoint, without a fresh
+      // stream call — the two endpoints share one cache, keyed on the same
+      // normalised question and corpus version, so a hit on one path is a
+      // hit on the other.
+      const streamed = await request(twinsApp.getHttpServer())
+        .post('/ask/stream')
+        .send({ question })
+        .expect(200);
+
+      expect(streamCalls).toBe(0);
+      expect(streamed.text).toContain('event: token');
+      expect(streamed.text).toContain('Use the marker option [1].');
+    } finally {
+      await twinsApp.close();
+    }
+  });
+
+  it('serves a cache hit over SSE as citations, one token event carrying the whole text, then done', async () => {
+    // Its own app rather than the file's shared one: the shared app's
+    // CorpusVersion is the real, Postgres-derived one, which two HTTP calls
+    // apart in time would race every other suite writing to `sources` (see
+    // FakeCorpusVersion above) — this test cares about SSE frame shape, not
+    // about corpus derivation, so it does not need the real one.
+    const shape = await askTestingModule()
+      .overrideProvider(LLM)
+      .useValue(stubLlm)
+      .overrideProvider(CorpusVersion)
+      .useValue(new FakeCorpusVersion())
+      .compile();
+
+    const shapeApp = shape.createNestApplication<INestApplication<Server>>();
+    await listenOnEphemeralPort(shapeApp);
+
+    const question = `what does unmistakablemarker do, sse hit shape test ${randomUUID()}?`;
+
+    try {
+      // Warms the cache via the JSON endpoint.
+      await request(shapeApp.getHttpServer())
+        .post('/ask')
+        .send({ question })
+        .expect(200);
+
+      const response = await request(shapeApp.getHttpServer())
+        .post('/ask/stream')
+        .send({ question })
+        .expect(200)
+        .expect('content-type', /text\/event-stream/);
+
+      const citationsAt = response.text.indexOf('event: citations');
+      const tokenAt = response.text.indexOf('event: token');
+      const doneAt = response.text.indexOf('event: done');
+
+      expect(citationsAt).toBeGreaterThanOrEqual(0);
+      expect(tokenAt).toBeGreaterThan(citationsAt);
+      expect(doneAt).toBeGreaterThan(tokenAt);
+
+      // Exactly one token event: the whole answer arrives in a single frame,
+      // not paced out delta by delta the way a fresh completion would be.
+      expect(response.text.match(/event: token/g)).toHaveLength(1);
+      expect(response.text).toContain('data: "Use the marker option [1]."');
+    } finally {
+      await shapeApp.close();
+    }
+  });
+
+  // The SSE hit branch sends its own `citations`/`token`/`done` frames
+  // directly, rather than going through the same code AskService.ask() uses
+  // to answer a JSON request — so nothing stops a future edit from wiring up
+  // the frames correctly while forgetting the recordCacheHit() call beside
+  // them. Every other test proving the frame shape stops at the wire and
+  // never checks the database, so a regression here (dropping the record
+  // call while keeping the frames byte-for-byte identical) would pass three
+  // full test runs unnoticed: the eval suite reads `queries`, and a hit
+  // served over this endpoint would vanish from it silently.
+  it('records a cache hit served over SSE, so it does not vanish from queries, answers or cost_ledger', async () => {
+    const recording = await askTestingModule()
+      .overrideProvider(LLM)
+      .useValue(stubLlm)
+      .overrideProvider(CorpusVersion)
+      .useValue(new FakeCorpusVersion())
+      .compile();
+
+    const recordingApp =
+      recording.createNestApplication<INestApplication<Server>>();
+    await listenOnEphemeralPort(recordingApp);
+
+    const question = `what does unmistakablemarker do, sse hit recording test ${randomUUID()}?`;
+
+    try {
+      // Warms the cache via the JSON endpoint — one queries/answers row.
+      await request(recordingApp.getHttpServer())
+        .post('/ask')
+        .send({ question })
+        .expect(200);
+
+      // Served from cache over SSE — should be a second queries/answers row,
+      // with a `cached` cost_ledger row alongside it.
+      await request(recordingApp.getHttpServer())
+        .post('/ask/stream')
+        .send({ question })
+        .expect(200)
+        .expect('content-type', /text\/event-stream/);
+
+      const queries = await db
+        .selectFrom('queries')
+        .select('id')
+        .where('question', '=', question)
+        .execute();
+      expect(queries).toHaveLength(2);
+
+      const costRows = await db
+        .selectFrom('cost_ledger')
+        .innerJoin('queries', 'queries.id', 'cost_ledger.query_id')
+        .select(['cost_ledger.cost_source', 'cost_ledger.usd_cost'])
+        .where('queries.question', '=', question)
+        .orderBy('cost_ledger.created_at')
+        .execute();
+
+      expect(costRows).toHaveLength(2);
+      expect(costRows[1]?.cost_source).toBe('cached');
+      expect(Number(costRows[1]?.usd_cost)).toBe(0);
+    } finally {
+      await recordingApp.close();
     }
   });
 });

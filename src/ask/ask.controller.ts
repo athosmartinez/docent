@@ -84,6 +84,28 @@ export class AskController {
     res.flushHeaders();
 
     try {
+      const cached = await this.service.cachedAnswer(question);
+
+      if (cached) {
+        // A hit is served in the same event order and shape a fresh answer
+        // would be, so the client cannot tell the two apart: citations,
+        // then the answer, then done. The whole text goes out as one token
+        // event rather than several — there is nothing left to stream, and
+        // pacing a cached string out with timers would be inventing latency
+        // that never happened. A falsy answer covers both a refusal (null)
+        // and a grounded-but-empty answer (a cached content-filter result),
+        // matching the zero-delta case a fresh stream never emits a token
+        // event for either.
+        sse(res, 'citations', cached.citations);
+        if (cached.answer) {
+          sse(res, 'token', cached.answer);
+        }
+        sse(res, 'done', { grounded: cached.grounded });
+        await this.service.recordCacheHit(question, cached);
+        res.end();
+        return;
+      }
+
       const chunks = await this.service.retrieveGrounded(question);
 
       if (!chunks) {

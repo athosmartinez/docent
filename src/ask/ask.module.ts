@@ -19,6 +19,12 @@ import { AskService } from './ask.service';
       useFactory: (config: ConfigService<Env, true>): number =>
         config.get('GROUNDING_MAX_DISTANCE', { infer: true }),
     },
+    {
+      provide: 'CACHE_ANSWER_TTL_S',
+      inject: [ConfigService],
+      useFactory: (config: ConfigService<Env, true>): number =>
+        config.get('CACHE_ANSWER_TTL_S', { infer: true }),
+    },
   ],
   exports: [AskRepository, AskService],
 })

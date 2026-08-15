@@ -1,3 +1,6 @@
+import { answerKey } from '../common/cache/cache.keys';
+import type { CacheService } from '../common/cache/cache.service';
+import type { CorpusVersion } from '../common/cache/corpus-version';
 import { AskService } from './ask.service';
 import type { RetrievalService } from '../retrieval/retrieval.service';
 import type {
@@ -6,6 +9,7 @@ import type {
   StreamOutcome,
 } from '../llm/llm.types';
 import type { AskRepository, RecordInput } from './ask.repository';
+import type { CachedAnswer } from './ask.types';
 import type {
   RetrievalResult,
   RetrievedChunk,
@@ -31,6 +35,11 @@ const outcome = (overrides: Partial<StreamOutcome> = {}): StreamOutcome => ({
   ...overrides,
 });
 
+// The version every double below reports, so a test can build an `answerKey`
+// to assert against without threading a value through `build`'s return.
+const CACHE_VERSION = 'v1';
+const ANSWER_CACHE_TTL_S = 604_800;
+
 /**
  * `record` is `jest.fn()` without a call-signature generic, so every call's
  * argument types as `any` — asserting on `.cost` through nested
@@ -43,14 +52,65 @@ function recordedInput(record: jest.Mock, callIndex = 0): RecordInput {
   return call[0] as RecordInput;
 }
 
+interface CacheDouble {
+  getJson: jest.Mock;
+  setJson: jest.Mock;
+}
+
+/** A miss on every read and a swallowed write, unless a test overrides one. */
+function cacheDouble(overrides: Partial<CacheDouble> = {}): CacheDouble {
+  return {
+    getJson: jest.fn().mockResolvedValue(null),
+    setJson: jest.fn().mockResolvedValue(undefined),
+    ...overrides,
+  };
+}
+
+function corpusVersionDouble(version = CACHE_VERSION): {
+  current: jest.Mock;
+} {
+  return { current: jest.fn().mockResolvedValue(version) };
+}
+
+/**
+ * The trailing three constructor arguments for a test that constructs
+ * `AskService` directly rather than through `build()` and has no interest in
+ * caching behaviour itself — always a miss on read, a swallowed write, unless
+ * `corpusVersionRejects` asks for a `current()` that always throws instead,
+ * for a test proving `recordStreamed`/`recordRefusal` swallow the cache
+ * write's own failure the same way they already swallow persistence's. Both
+ * call `corpusVersion.current()` exactly once, only from `writeCache()`, so
+ * an unconditional rejection targets the right call. `ask()`'s own version of
+ * this test calls `corpusVersion.current()` twice — once via `cachedAnswer`,
+ * once via `writeCache` — and builds its own double inline rather than reuse
+ * this one, so the miss lookup is unaffected and only the write is exercised.
+ */
+function noCache(
+  options: { corpusVersionRejects?: boolean } = {},
+): [CacheService, CorpusVersion, number] {
+  const corpusVersion = options.corpusVersionRejects
+    ? {
+        current: jest
+          .fn()
+          .mockRejectedValue(new Error('corpus version lookup down')),
+      }
+    : corpusVersionDouble();
+
+  return [
+    cacheDouble() as unknown as CacheService,
+    corpusVersion as unknown as CorpusVersion,
+    ANSWER_CACHE_TTL_S,
+  ];
+}
+
 function build(
   result: RetrievalResult,
   maxDistance = 0.5,
   completionOverrides: Partial<CompletionResult> = {},
+  cacheOverrides: Partial<CacheDouble> = {},
 ) {
-  const retrieval = {
-    search: jest.fn().mockResolvedValue(result),
-  } as unknown as RetrievalService;
+  const search = jest.fn().mockResolvedValue(result);
+  const retrieval = { search } as unknown as RetrievalService;
 
   const completion: CompletionResult = {
     text: 'the answer [1]',
@@ -68,10 +128,24 @@ function build(
   const record = jest.fn().mockResolvedValue('answer-id');
   const repository = { record } as unknown as AskRepository;
 
+  const cache = cacheDouble(cacheOverrides);
+  const corpusVersion = corpusVersionDouble();
+
   return {
-    service: new AskService(retrieval, llm, repository, maxDistance),
+    service: new AskService(
+      retrieval,
+      llm,
+      repository,
+      maxDistance,
+      cache as unknown as CacheService,
+      corpusVersion as unknown as CorpusVersion,
+      ANSWER_CACHE_TTL_S,
+    ),
     complete,
     record,
+    search,
+    cache,
+    corpusVersion,
   };
 }
 
@@ -255,10 +329,56 @@ describe('AskService', () => {
       { complete, stream: jest.fn() },
       repository,
       0.5,
+      ...noCache(),
     );
 
     // Losing the record is bad; returning an error to someone who has the
     // answer is worse.
+    await expect(failing.ask('how?')).resolves.toMatchObject({
+      grounded: true,
+      answer: 'answer',
+    });
+  });
+
+  // The same guarantee, from the write side of the cache rather than the
+  // repository: writeCache() runs after persist() and calls a live Postgres
+  // query of its own (corpusVersion.current()), which — unlike CacheService
+  // — does not fail open on its own. Losing the cache write is the same
+  // class of problem as losing the record: real, worth logging, and not a
+  // reason to hand a 503 to someone who already has a correct answer.
+  it('still returns the answer when the cache write fails', async () => {
+    const record = jest.fn().mockResolvedValue('answer-id');
+    const repository = { record } as unknown as AskRepository;
+    const search = jest
+      .fn()
+      .mockResolvedValue({ chunks: [chunk('a')], bestDistance: 0.3 });
+    const complete = jest.fn().mockResolvedValue({
+      text: 'answer',
+      model: 'm',
+      provider: 'openai',
+      finishReason: 'stop',
+    });
+    // Resolves for `ask()`'s own `cachedAnswer()` lookup (call 1, a miss —
+    // paired with a cache double that returns null regardless of the version
+    // it's asked about) and rejects for `writeCache()`'s lookup afterwards
+    // (call 2), so only the write side this test means to target fails.
+    const corpusVersion = {
+      current: jest
+        .fn()
+        .mockResolvedValueOnce(CACHE_VERSION)
+        .mockRejectedValue(new Error('corpus version lookup down')),
+    };
+
+    const failing = new AskService(
+      { search } as unknown as RetrievalService,
+      { complete, stream: jest.fn() },
+      repository,
+      0.5,
+      cacheDouble() as unknown as CacheService,
+      corpusVersion as unknown as CorpusVersion,
+      ANSWER_CACHE_TTL_S,
+    );
+
     await expect(failing.ask('how?')).resolves.toMatchObject({
       grounded: true,
       answer: 'answer',
@@ -464,6 +584,33 @@ describe('AskService.recordStreamed', () => {
       llm,
       repository,
       0.5,
+      ...noCache(),
+    );
+
+    await expect(
+      service.recordStreamed('q', [chunk('a')], 'text', outcome()),
+    ).resolves.toBeUndefined();
+  });
+
+  // This test's name used to be the same as the one above it and covered
+  // only `repository.record` rejecting — leaving the cache write's own
+  // Postgres call (corpusVersion.current(), inside writeCache()) completely
+  // unstubbed and so, by construction, unable to catch it throwing. On the
+  // real streaming path this runs after `sse(res, 'done', …)` has already
+  // gone out, so an unswallowed rejection here means the client renders a
+  // complete answer and then receives an `event: error` right after it.
+  it('does not throw when the cache write fails', async () => {
+    const repository = {
+      record: jest.fn().mockResolvedValue('answer-id'),
+    } as unknown as AskRepository;
+
+    const llm: LlmProvider = { complete: jest.fn(), stream: jest.fn() };
+    const service = new AskService(
+      { search: jest.fn() } as unknown as RetrievalService,
+      llm,
+      repository,
+      0.5,
+      ...noCache({ corpusVersionRejects: true }),
     );
 
     await expect(
@@ -503,6 +650,29 @@ describe('AskService.recordRefusal', () => {
       { complete: jest.fn(), stream: jest.fn() },
       repository,
       0.5,
+      ...noCache(),
+    );
+
+    await expect(service.recordRefusal('anything')).resolves.toBeUndefined();
+  });
+
+  // The same gap as `recordStreamed`'s sibling test above: `recordRefusal`
+  // also calls `writeCache()` (a cached refusal is cached too), whose own
+  // Postgres call can reject independently of `repository.record`. The
+  // streaming controller's refusal branch sends `done` before calling this,
+  // so the same "complete response, then a trailing error frame" failure
+  // mode applies here too.
+  it('does not throw when the cache write fails', async () => {
+    const repository = {
+      record: jest.fn().mockResolvedValue('answer-id'),
+    } as unknown as AskRepository;
+
+    const service = new AskService(
+      { search: jest.fn() } as unknown as RetrievalService,
+      { complete: jest.fn(), stream: jest.fn() },
+      repository,
+      0.5,
+      ...noCache({ corpusVersionRejects: true }),
     );
 
     await expect(service.recordRefusal('anything')).resolves.toBeUndefined();
@@ -580,5 +750,298 @@ describe('ask() and recordStreamed() store the same shape', () => {
 
     expect(recordedInput(askRecord)).toMatchObject(answered);
     expect(recordedInput(streamRecord)).toMatchObject(answered);
+  });
+});
+
+const cachedGrounded = (
+  overrides: Partial<CachedAnswer> = {},
+): CachedAnswer => ({
+  answer: 'cached answer [1]',
+  grounded: true,
+  citations: [
+    {
+      ordinal: 1,
+      chunkId: 'a',
+      path: 'content/a.md',
+      headingPath: [],
+      score: 1,
+    },
+  ],
+  provider: 'openai',
+  model: 'gpt-4.1-mini',
+  finishReason: 'stop',
+  ...overrides,
+});
+
+const cachedRefusal: CachedAnswer = {
+  answer: null,
+  grounded: false,
+  citations: [],
+  provider: null,
+  model: null,
+  finishReason: null,
+};
+
+describe('AskService.cachedAnswer', () => {
+  it('reads a hit keyed by the corpus version and the question', async () => {
+    const payload = cachedGrounded();
+    const { service, cache, corpusVersion } = build(
+      { chunks: [], bestDistance: null },
+      0.5,
+      {},
+      { getJson: jest.fn().mockResolvedValue(payload) },
+    );
+
+    const result = await service.cachedAnswer('a question');
+
+    expect(corpusVersion.current).toHaveBeenCalled();
+    expect(cache.getJson).toHaveBeenCalledWith(
+      answerKey(CACHE_VERSION, 'a question'),
+    );
+    expect(result).toEqual(payload);
+  });
+
+  it('returns null on a miss', async () => {
+    const { service } = build({ chunks: [], bestDistance: null });
+
+    await expect(service.cachedAnswer('anything')).resolves.toBeNull();
+  });
+});
+
+describe('AskService.ask — cache hit', () => {
+  it('serves a hit without calling retrieval or the model', async () => {
+    const { service, complete, search } = build(
+      { chunks: [chunk('a')], bestDistance: 0.3 },
+      0.5,
+      {},
+      { getJson: jest.fn().mockResolvedValue(cachedGrounded()) },
+    );
+
+    const result = await service.ask('how?');
+
+    expect(result).toEqual({
+      answer: 'cached answer [1]',
+      grounded: true,
+      citations: cachedGrounded().citations,
+    });
+    expect(search).not.toHaveBeenCalled();
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it('persists a hit with a cost_source of cached, zero cost, and the cached provider/model', async () => {
+    const { service, record } = build(
+      { chunks: [], bestDistance: null },
+      0.5,
+      {},
+      { getJson: jest.fn().mockResolvedValue(cachedGrounded()) },
+    );
+
+    await service.ask('how?');
+
+    expect(recordedInput(record).cost).toEqual({
+      provider: 'openai',
+      model: 'gpt-4.1-mini',
+      promptTokens: 0,
+      completionTokens: 0,
+      cachedTokens: 0,
+      usdCost: 0,
+      costSource: 'cached',
+      modelReason: 'cached',
+    });
+  });
+
+  // The twin the brief calls out by name: a cached answer and a cached
+  // refusal must be told apart the same way an uncached one already is — no
+  // ledger row for the refusal.
+  it('persists a cached refusal with no ledger row, the twin of an uncached refusal', async () => {
+    const { service, record } = build(
+      { chunks: [], bestDistance: null },
+      0.5,
+      {},
+      { getJson: jest.fn().mockResolvedValue(cachedRefusal) },
+    );
+
+    await service.ask('what is the capital of France?');
+
+    expect(recordedInput(record).grounded).toBe(false);
+    expect(recordedInput(record).answer).toBeNull();
+    expect(recordedInput(record).cost).toBeUndefined();
+  });
+
+  it('returns a cached refusal to the caller unchanged', async () => {
+    const { service } = build(
+      { chunks: [], bestDistance: null },
+      0.5,
+      {},
+      { getJson: jest.fn().mockResolvedValue(cachedRefusal) },
+    );
+
+    await expect(
+      service.ask('what is the capital of France?'),
+    ).resolves.toEqual({ answer: null, grounded: false, citations: [] });
+  });
+});
+
+describe('AskService — writing the cache on a miss', () => {
+  it('ask() writes the answer to the cache after answering', async () => {
+    const { service, cache } = build(
+      { chunks: [chunk('a')], bestDistance: 0.3 },
+      0.5,
+      {
+        text: 'the answer [1]',
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        finishReason: 'stop',
+      },
+    );
+
+    await service.ask('how?');
+
+    expect(cache.setJson).toHaveBeenCalledWith(
+      answerKey(CACHE_VERSION, 'how?'),
+      {
+        answer: 'the answer [1]',
+        grounded: true,
+        citations: expect.any(Array) as unknown[],
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        finishReason: 'stop',
+      },
+      ANSWER_CACHE_TTL_S,
+    );
+  });
+
+  // The biggest saving: a refusal is cached too, so a repeat of a question
+  // the corpus cannot answer never pays for another embedding or retrieval
+  // query, only for this Redis read.
+  it('ask() writes a refusal to the cache too, without calling the model', async () => {
+    const { service, cache, complete } = build({
+      chunks: [],
+      bestDistance: null,
+    });
+
+    await service.ask('what is the capital of France?');
+
+    expect(complete).not.toHaveBeenCalled();
+    expect(cache.setJson).toHaveBeenCalledWith(
+      answerKey(CACHE_VERSION, 'what is the capital of France?'),
+      {
+        answer: null,
+        grounded: false,
+        citations: [],
+        provider: null,
+        model: null,
+        finishReason: null,
+      },
+      ANSWER_CACHE_TTL_S,
+    );
+  });
+
+  it('recordStreamed() writes the streamed answer to the cache', async () => {
+    const { service, cache } = build({
+      chunks: [chunk('a')],
+      bestDistance: 0.3,
+    });
+
+    await service.recordStreamed(
+      'how?',
+      [chunk('a')],
+      'the streamed answer [1]',
+      outcome({
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        finishReason: 'stop',
+      }),
+    );
+
+    expect(cache.setJson).toHaveBeenCalledWith(
+      answerKey(CACHE_VERSION, 'how?'),
+      {
+        answer: 'the streamed answer [1]',
+        grounded: true,
+        citations: expect.any(Array) as unknown[],
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        finishReason: 'stop',
+      },
+      ANSWER_CACHE_TTL_S,
+    );
+  });
+
+  it('recordRefusal() writes the refusal to the cache', async () => {
+    const { service, cache } = build({ chunks: [], bestDistance: null });
+
+    await service.recordRefusal('anything');
+
+    expect(cache.setJson).toHaveBeenCalledWith(
+      answerKey(CACHE_VERSION, 'anything'),
+      {
+        answer: null,
+        grounded: false,
+        citations: [],
+        provider: null,
+        model: null,
+        finishReason: null,
+      },
+      ANSWER_CACHE_TTL_S,
+    );
+  });
+});
+
+describe('the answer cache is written identically regardless of which path wrote it', () => {
+  // `ask()`'s own refusal branch delegates to `recordRefusal` rather than
+  // duplicating it, precisely to close the "one path pinned, its twin left
+  // open" gap this milestone kept producing — this test is what would catch
+  // a future edit that reintroduced the duplication and let the two drift.
+  it("ask()'s refusal and a direct recordRefusal() call write the same cache entry", async () => {
+    const { service: askService, cache: askCache } = build({
+      chunks: [],
+      bestDistance: null,
+    });
+    const { service: refusalService, cache: refusalCache } = build({
+      chunks: [],
+      bestDistance: null,
+    });
+
+    await askService.ask('what is the capital of France?');
+    await refusalService.recordRefusal('what is the capital of France?');
+
+    expect(askCache.setJson.mock.calls[0]).toEqual(
+      refusalCache.setJson.mock.calls[0],
+    );
+  });
+
+  // `ask()` and `recordStreamed()` are separate implementations of "a fresh,
+  // grounded answer" — one persisted via a completion, the other via a
+  // stream outcome — so agreement here is not free the way the refusal case
+  // above is; each still has to wire its own inputs into the same shape.
+  it('ask() and recordStreamed() write the same cache entry for equivalent answers', async () => {
+    const shared = {
+      text: 'the same answer [1]',
+      provider: 'openai',
+      model: 'gpt-4.1-mini',
+      finishReason: 'stop',
+    };
+    const { service: askService, cache: askCache } = build(
+      { chunks: [chunk('a')], bestDistance: 0.3 },
+      0.5,
+      shared,
+    );
+    const { service: streamService, cache: streamCache } = build({
+      chunks: [chunk('a')],
+      bestDistance: 0.3,
+    });
+
+    await askService.ask('how?');
+    await streamService.recordStreamed(
+      'how?',
+      [chunk('a')],
+      shared.text,
+      outcome(shared),
+    );
+
+    expect(askCache.setJson.mock.calls[0]).toEqual(
+      streamCache.setJson.mock.calls[0],
+    );
   });
 });

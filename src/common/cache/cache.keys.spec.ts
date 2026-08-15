@@ -1,4 +1,5 @@
 import {
+  answerKey,
   decodeVector,
   embeddingKey,
   encodeVector,
@@ -75,6 +76,50 @@ describe('embeddingKey', () => {
     expect(embeddingKey('model', 3072, 'question')).toMatch(
       /^emb:[0-9a-f]{64}$/,
     );
+  });
+});
+
+describe('answerKey', () => {
+  it('is deterministic for identical inputs', () => {
+    expect(answerKey('v1', 'a question')).toBe(answerKey('v1', 'a question'));
+  });
+
+  // The version is what makes the whole cache invalidate: two answers
+  // computed against different corpora must never collide on the same key
+  // even when the question is byte-for-byte identical.
+  it('differs when the version differs and nothing else does', () => {
+    const a = answerKey('v1', 'a question');
+    const b = answerKey('v2', 'a question');
+
+    expect(a).not.toBe(b);
+  });
+
+  it('differs when the question differs', () => {
+    const a = answerKey('v1', 'a question');
+    const b = answerKey('v1', 'another question');
+
+    expect(a).not.toBe(b);
+  });
+
+  it('is the same for a question with surrounding or collapsed whitespace', () => {
+    const a = answerKey('v1', 'a  question');
+    const b = answerKey('v1', '  a question  ');
+
+    expect(a).toBe(b);
+  });
+
+  it('preserves case: two questions differing only in case get different keys', () => {
+    const a = answerKey('v1', 'How Do I Use ValidationPipe?');
+    const b = answerKey('v1', 'how do i use validationpipe?');
+
+    expect(a).not.toBe(b);
+  });
+
+  // The version is carried verbatim, not folded into the hash — an operator
+  // reading Redis (SCAN, monitoring) can tell which corpus an entry belongs
+  // to without decoding anything.
+  it('is namespaced under an ans: prefix carrying the version verbatim', () => {
+    expect(answerKey('v1', 'question')).toMatch(/^ans:v1:[0-9a-f]{64}$/);
   });
 });
 

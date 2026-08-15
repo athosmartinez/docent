@@ -1,6 +1,6 @@
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { Kysely } from 'kysely';
+import { Kysely, sql } from 'kysely';
 import * as path from 'node:path';
 import request from 'supertest';
 import type { Server } from 'node:http';
@@ -151,5 +151,55 @@ describe('ingestion lease heartbeat', () => {
 
     const ready = await waitForStatus(app.getHttpServer(), staleId, 'ready');
     expect(ready.status).toBe('ready');
+  });
+
+  // The staleness threshold (`reuse()` in ingestion.service.ts) is computed
+  // from `repository.databaseNow()`, the same clock every `updated_at`
+  // write already uses — not from the application's `Date.now()`. A wildly
+  // wrong application clock is what makes the two distinguishable: with the
+  // old `Date.now()`-based threshold, faking the clock far into the future
+  // pushes `staleBefore` far past this row's real, moments-old `updated_at`,
+  // making a genuinely live lease look expired and letting a second request
+  // reclaim it out from under a (hypothetically) still-running pipeline. Only
+  // Date is faked — every real timer stays real, so the request's own HTTP
+  // round trip and the app's internal timers are unaffected (see the sibling
+  // clock test in ingestion.repository.e2e-spec.ts for why that matters).
+  it('a skewed application clock does not make a genuinely live lease look expired', async () => {
+    const repository = app.get(IngestionRepository);
+
+    const freshId = await repository.createSource(SOURCE, 'docs');
+    // Fresh by the database's own clock, well inside TEST_LEASE_MS — no
+    // pipeline actually running against it keeps the test simple, but what
+    // matters is that this lease has not gone stale.
+    await db
+      .updateTable('sources')
+      .set({ status: 'processing', updated_at: sql`now()` })
+      .where('id', '=', freshId)
+      .execute();
+
+    jest.useFakeTimers({
+      now: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+      doNotFake: [
+        'setTimeout',
+        'clearTimeout',
+        'setInterval',
+        'clearInterval',
+        'setImmediate',
+        'clearImmediate',
+        'nextTick',
+        'queueMicrotask',
+      ],
+    });
+
+    let response;
+    try {
+      response = await request(app.getHttpServer())
+        .post('/ingest')
+        .send({ source: SOURCE });
+    } finally {
+      jest.useRealTimers();
+    }
+
+    expect(response.status).toBe(409);
   });
 });
