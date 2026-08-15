@@ -46,6 +46,15 @@ export const envSchema = z
     // exclusive (`lt`, not `max`/`lte`) precisely to close that: 2 itself
     // is exactly as broken as anything above it, not a safe edge.
     GROUNDING_MAX_DISTANCE: z.coerce.number().positive().lt(2).default(0.61568),
+    // Bounds memory only. Staleness is impossible by construction — the
+    // model and dimensionality are part of the cache key itself, so a
+    // changed setting changes the key rather than serving an old vector
+    // under it.
+    CACHE_EMBEDDING_TTL_S: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(2_592_000),
   })
   .refine((env) => env.EMBEDDING_DIMENSIONS === CHUNK_EMBEDDING_DIMENSIONS, {
     message: `must be ${CHUNK_EMBEDDING_DIMENSIONS}, the dimensionality the chunks column declares`,

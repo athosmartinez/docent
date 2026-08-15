@@ -89,6 +89,24 @@ describe('validateEnv', () => {
 
     expect(env.GROUNDING_MAX_DISTANCE).toBe(1.9999);
   });
+
+  it('defaults CACHE_EMBEDDING_TTL_S to thirty days', () => {
+    const env = validateEnv({ ...valid });
+
+    expect(env.CACHE_EMBEDDING_TTL_S).toBe(2_592_000);
+  });
+
+  it('coerces CACHE_EMBEDDING_TTL_S from its string form', () => {
+    const env = validateEnv({ ...valid, CACHE_EMBEDDING_TTL_S: '60' });
+
+    expect(env.CACHE_EMBEDDING_TTL_S).toBe(60);
+  });
+
+  it('rejects a non-positive CACHE_EMBEDDING_TTL_S', () => {
+    expect(() => validateEnv({ ...valid, CACHE_EMBEDDING_TTL_S: '0' })).toThrow(
+      /CACHE_EMBEDDING_TTL_S/,
+    );
+  });
 });
 
 const base = {

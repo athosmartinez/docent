@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AppConfigModule } from './common/config/config.module';
+import { CacheModule } from './common/cache/cache.module';
 import { DatabaseModule } from './common/database/database.module';
 import { RedisModule } from './common/redis/redis.module';
 import { AskModule } from './ask/ask.module';
@@ -14,6 +15,7 @@ import { RetrievalModule } from './retrieval/retrieval.module';
 @Module({
   imports: [
     AppConfigModule,
+    CacheModule,
     DatabaseModule,
     RedisModule,
     AskModule,
