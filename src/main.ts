@@ -14,6 +14,13 @@ async function bootstrap(): Promise<void> {
   app.enableShutdownHooks();
 
   const config = app.get<ConfigService<Env, true>>(ConfigService);
+
+  // TRUST_PROXY is applied by ThrottlingModule's TrustProxyBootstrap
+  // (an OnApplicationBootstrap provider), not here — see its own comment
+  // for why: this file is the only one of twelve places that build this
+  // app that ever ran a bootstrap function, so a step that lived only here
+  // never ran for any of the other eleven (every e2e suite).
+
   await app.listen(config.get('PORT', { infer: true }));
 }
 

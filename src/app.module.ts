@@ -4,6 +4,7 @@ import { AppConfigModule } from './common/config/config.module';
 import { CacheModule } from './common/cache/cache.module';
 import { DatabaseModule } from './common/database/database.module';
 import { RedisModule } from './common/redis/redis.module';
+import { ThrottlingModule } from './common/throttling/throttling.module';
 import { AskModule } from './ask/ask.module';
 import { CostModule } from './cost/cost.module';
 import { EmbeddingsModule } from './embeddings/embeddings.module';
@@ -18,6 +19,7 @@ import { RetrievalModule } from './retrieval/retrieval.module';
     CacheModule,
     DatabaseModule,
     RedisModule,
+    ThrottlingModule,
     AskModule,
     CostModule,
     EmbeddingsModule,

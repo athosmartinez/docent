@@ -10,11 +10,17 @@ import {
   Res,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 
 import { describeError } from '../common/describe-error';
+import {
+  MS_PER_MINUTE,
+  sharedBucketKey,
+  throttleLimits,
+} from '../common/throttling/throttling.module';
 import { LLM, type LlmProvider } from '../llm/llm.types';
 import { AskService } from './ask.service';
 import type { AskResult } from './ask.types';
@@ -35,6 +41,23 @@ const sse = (res: Response, event: string, data: unknown): void => {
 const SERVICE_UNAVAILABLE_MESSAGE =
   'the service is temporarily unavailable, try again shortly';
 
+// /ask and /ask/stream both answer a question through the same LLM call —
+// streaming is a transport choice, not a separate operation — so they share
+// one rate-limit bucket via `sharedBucketKey`. Left to the guard's default
+// per-handler key, a client could double its intended budget on the
+// expensive part of this service just by alternating between the two
+// routes for the same questions. Exported so `throttling.module.spec.ts`
+// can pin the window this applies over without booting the app — the
+// per-route `ttl` is as easy to get wrong as the per-route `limit` is, and
+// only the latter had a test.
+export const ASK_THROTTLE = {
+  default: {
+    limit: () => throttleLimits.askPerMinute,
+    ttl: MS_PER_MINUTE,
+    generateKey: sharedBucketKey('ask'),
+  },
+};
+
 @Controller()
 export class AskController {
   private readonly logger = new Logger(AskController.name);
@@ -53,6 +76,7 @@ export class AskController {
   // Nest's default status for POST is 201; this endpoint returns the
   // existing answer to a question, not a created resource.
   @HttpCode(200)
+  @Throttle(ASK_THROTTLE)
   async ask(@Body() body: unknown): Promise<AskResult> {
     const question = this.parse(body);
 
@@ -73,6 +97,7 @@ export class AskController {
   // method's default, regardless of @Res() — POST defaults to 201, but an
   // SSE stream is a normal 200 response kept open, not a created resource.
   @HttpCode(200)
+  @Throttle(ASK_THROTTLE)
   async stream(@Body() body: unknown, @Res() res: Response): Promise<void> {
     const question = this.parse(body);
 

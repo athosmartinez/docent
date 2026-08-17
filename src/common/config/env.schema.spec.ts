@@ -107,6 +107,107 @@ describe('validateEnv', () => {
       /CACHE_EMBEDDING_TTL_S/,
     );
   });
+
+  // The bound is load-bearing, not decorative: THROTTLE_ASK_PER_MINUTE=0
+  // makes every request to /ask fail (totalHits, at minimum 1, is always
+  // > 0), and a negative or fractional limit is nonsensical for the same
+  // comparison. Each of the three keys is checked independently — a fix
+  // applied to one by copy-paste, forgotten on the others, still fails
+  // here.
+  it.each([
+    'THROTTLE_DEFAULT_PER_MINUTE',
+    'THROTTLE_ASK_PER_MINUTE',
+    'THROTTLE_INGEST_PER_MINUTE',
+    'THROTTLE_HEALTH_PER_MINUTE',
+  ])('rejects a zero %s', (key) => {
+    expect(() => validateEnv({ ...valid, [key]: '0' })).toThrow(
+      new RegExp(key),
+    );
+  });
+
+  it.each([
+    'THROTTLE_DEFAULT_PER_MINUTE',
+    'THROTTLE_ASK_PER_MINUTE',
+    'THROTTLE_INGEST_PER_MINUTE',
+    'THROTTLE_HEALTH_PER_MINUTE',
+  ])('rejects a negative %s', (key) => {
+    expect(() => validateEnv({ ...valid, [key]: '-1' })).toThrow(
+      new RegExp(key),
+    );
+  });
+
+  it.each([
+    'THROTTLE_DEFAULT_PER_MINUTE',
+    'THROTTLE_ASK_PER_MINUTE',
+    'THROTTLE_INGEST_PER_MINUTE',
+    'THROTTLE_HEALTH_PER_MINUTE',
+  ])('rejects a non-integer %s', (key) => {
+    expect(() => validateEnv({ ...valid, [key]: '1.5' })).toThrow(
+      new RegExp(key),
+    );
+  });
+
+  it('defaults the four rate limits to 60/10/2/300 per minute', () => {
+    const env = validateEnv({ ...valid });
+
+    expect(env.THROTTLE_DEFAULT_PER_MINUTE).toBe(60);
+    expect(env.THROTTLE_ASK_PER_MINUTE).toBe(10);
+    expect(env.THROTTLE_INGEST_PER_MINUTE).toBe(2);
+    expect(env.THROTTLE_HEALTH_PER_MINUTE).toBe(300);
+  });
+
+  describe('TRUST_PROXY', () => {
+    it('defaults to false', () => {
+      const env = validateEnv({ ...valid });
+
+      expect(env.TRUST_PROXY).toBe(false);
+    });
+
+    it('parses "false" as the boolean false', () => {
+      const env = validateEnv({ ...valid, TRUST_PROXY: 'false' });
+
+      expect(env.TRUST_PROXY).toBe(false);
+    });
+
+    // The literal `true` is the one value that makes the limiter fully
+    // evadable (see parseTrustProxy's own comment) — every deployment
+    // shape below is what boot should accept instead.
+    it('rejects the literal true, naming why', () => {
+      expect(() => validateEnv({ ...valid, TRUST_PROXY: 'true' })).toThrow(
+        /left-most/,
+      );
+    });
+
+    it('parses a hop count as a number', () => {
+      const env = validateEnv({ ...valid, TRUST_PROXY: '1' });
+
+      expect(env.TRUST_PROXY).toBe(1);
+    });
+
+    it.each(['loopback', 'linklocal', 'uniquelocal'])(
+      'parses the %s preset as itself',
+      (preset) => {
+        const env = validateEnv({ ...valid, TRUST_PROXY: preset });
+
+        expect(env.TRUST_PROXY).toBe(preset);
+      },
+    );
+
+    it('parses a comma-separated list of addresses/CIDRs as itself', () => {
+      const env = validateEnv({
+        ...valid,
+        TRUST_PROXY: '10.0.0.1, 172.16.0.0/12',
+      });
+
+      expect(env.TRUST_PROXY).toBe('10.0.0.1, 172.16.0.0/12');
+    });
+
+    it('rejects a list with an empty entry', () => {
+      expect(() =>
+        validateEnv({ ...valid, TRUST_PROXY: '10.0.0.1,,172.16.0.0/12' }),
+      ).toThrow(/TRUST_PROXY/);
+    });
+  });
 });
 
 const base = {
