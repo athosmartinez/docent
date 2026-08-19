@@ -153,6 +153,17 @@ export const envSchema = z
     // parseTrustProxy above for the accepted forms and why the literal
     // `true` is rejected rather than accepted and misused.
     TRUST_PROXY: z.string().default('false').transform(parseTrustProxy),
+    // Left unset, a developer running the service locally gets Nest's own
+    // readable console format; unset anywhere else gets JSON, on the
+    // assumption that "anywhere else" means a collector is reading stdout,
+    // not a person. The field itself only validates its two literal values
+    // here — the NODE_ENV-conditioned default is filled in by the
+    // `.transform` below, since a per-field default cannot see a sibling
+    // field's already-resolved value. Set explicitly, LOG_FORMAT always
+    // wins over that default in either direction: NODE_ENV=production with
+    // LOG_FORMAT=pretty still gets the readable format, e.g. for a
+    // production console session a human is watching live.
+    LOG_FORMAT: z.enum(['json', 'pretty']).optional(),
   })
   .refine((env) => env.EMBEDDING_DIMENSIONS === CHUNK_EMBEDDING_DIMENSIONS, {
     message: `must be ${CHUNK_EMBEDDING_DIMENSIONS}, the dimensionality the chunks column declares`,
@@ -188,7 +199,12 @@ export const envSchema = z
         });
       }
     }
-  });
+  })
+  .transform((env) => ({
+    ...env,
+    LOG_FORMAT:
+      env.LOG_FORMAT ?? (env.NODE_ENV === 'development' ? 'pretty' : 'json'),
+  }));
 
 export type Env = z.infer<typeof envSchema>;
 

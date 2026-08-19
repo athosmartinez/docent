@@ -208,6 +208,45 @@ describe('validateEnv', () => {
       ).toThrow(/TRUST_PROXY/);
     });
   });
+
+  describe('LOG_FORMAT', () => {
+    // Both branches of the same NODE_ENV-conditioned default, in one test:
+    // a mutation that hardcodes either literal (always 'pretty', always
+    // 'json') passes whichever assertion matches its constant and fails the
+    // other — testing only one environment would leave that mutation
+    // undetected.
+    it('defaults to pretty in development and json everywhere else', () => {
+      expect(
+        validateEnv({ ...valid, NODE_ENV: 'development' }).LOG_FORMAT,
+      ).toBe('pretty');
+      expect(validateEnv({ ...valid, NODE_ENV: 'production' }).LOG_FORMAT).toBe(
+        'json',
+      );
+      expect(validateEnv({ ...valid, NODE_ENV: 'test' }).LOG_FORMAT).toBe(
+        'json',
+      );
+    });
+
+    // An explicit value always wins over the NODE_ENV-derived default, in
+    // both directions — proving the override is read before the default is
+    // computed, not applied on top of it or ignored.
+    it('an explicit LOG_FORMAT overrides the NODE_ENV default in either direction', () => {
+      expect(
+        validateEnv({ ...valid, NODE_ENV: 'development', LOG_FORMAT: 'json' })
+          .LOG_FORMAT,
+      ).toBe('json');
+      expect(
+        validateEnv({ ...valid, NODE_ENV: 'production', LOG_FORMAT: 'pretty' })
+          .LOG_FORMAT,
+      ).toBe('pretty');
+    });
+
+    it('rejects a value that is neither json nor pretty', () => {
+      expect(() => validateEnv({ ...valid, LOG_FORMAT: 'yaml' })).toThrow(
+        /LOG_FORMAT/,
+      );
+    });
+  });
 });
 
 const base = {

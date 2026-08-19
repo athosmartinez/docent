@@ -31,6 +31,20 @@ export function embeddingKey(
 }
 
 /**
+ * The question's identity, independent of any corpus version — a hash of
+ * the normalised text and nothing else. Shared by `answerKey` below (which
+ * namespaces it under a version) and by anything that needs to identify a
+ * question without exposing its text: a failure log line naming *which*
+ * question failed carries this instead of the question itself, and it is
+ * the identical hash `answerKey` uses, so the two are directly joinable —
+ * given a hash from a log line and a known corpus version, `ans:<version>:
+ * <hash>` is the exact key to check.
+ */
+export function questionHash(question: string): string {
+  return sha256(normaliseQuestion(question));
+}
+
+/**
  * Namespaced under the corpus version an answer was produced against —
  * carried in the key itself, not hashed away — so adding or removing a
  * ready source always invalidates every cached answer at once, by changing
@@ -46,7 +60,7 @@ export function embeddingKey(
  * anything for the cases it does cover.
  */
 export function answerKey(version: string, question: string): string {
-  return `ans:${version}:${sha256(normaliseQuestion(question))}`;
+  return `ans:${version}:${questionHash(question)}`;
 }
 
 /**
