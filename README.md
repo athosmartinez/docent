@@ -2,7 +2,7 @@
 
 # 🧭 docent
 
-**Agentic RAG over your documentation, built as a real backend service — ingestion and grounded answers with citations are live today; multi-provider fallback, cost tracking, the evaluation suite, and native MCP support are the target design.**
+**Agentic RAG over your documentation, built as a real backend service — ingestion, grounded answers with citations, multi-provider fallback, cost tracking, caching and rate limiting are live today; the evaluation suite and native MCP support are the target design.**
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
@@ -20,8 +20,9 @@ A **docent** is the expert guide who walks you through a collection and answers 
 
 Unlike a typical demo chatbot, `docent` is built like a real backend service, in **TypeScript / Nest.js**, with the engineering concerns that matter in production:
 
-- 🔀 **Multi-provider LLM routing with fallback** (OpenAI, Gemini, OpenRouter)
-- 💰 **Per-request cost & token accounting**
+- 🔀 **Multi-provider LLM routing with fallback** (OpenAI · OpenRouter)
+- 💰 **Per-request cost & token accounting**, aggregated at `GET /costs`
+- 🚦 **Redis-backed rate limiting and caching**, so a repeated question costs nothing
 - 🧪 **An automated evaluation suite** that measures answer *faithfulness* and *cost* across models
 - 🔌 **A native MCP server**, so it plugs into agentic IDEs and assistants
 
@@ -35,8 +36,9 @@ Unlike a typical demo chatbot, `docent` is built like a real backend service, in
 |---|---|
 | 📚 **Grounded, not guessing** | Every answer cites the exact source chunks it used, retrieved by fusing a vector search and a full-text search over the corpus. When nothing retrieved is close enough to the question, it refuses instead of guessing — `answer: null`, `citations: []`, `grounded: false` — without ever calling the LLM. The distance threshold is measured against the corpus, not chosen by hand. |
 | 🤖 **Agentic retrieval** *(planned)* | The model will use tools in multiple steps (search, fetch, plan) instead of a single naive lookup. |
-| 🔀 **Resilient by design** *(planned)* | If a provider fails or times out, requests will fall back down a configurable chain. No single point of failure. |
-| 💰 **Cost-aware** *(planned)* | Tokens and USD cost will be tracked per request, so you can answer "which model is best for *this* task, and at what price?". |
+| 🔀 **Resilient by design** | A completion is routed down a configurable provider chain, one link at a time; on any failure it falls through to the next link, attributing each failure to the link that produced it, and refuses to repeat a `provider:model` pair. The chain ships with a single OpenAI link by default — a fresh clone only needs `OPENAI_API_KEY` — and a second, OpenRouter, link is opt-in via `LLM_CHAIN` (see `.env.example`). |
+| 💰 **Cost-aware** | Every answered or refused question writes a row to a cost ledger — tokens, USD cost when the model is in the price table, which link answered and why — and `GET /costs?from&to` aggregates it over a time window, by provider and model. |
+| 🚦 **Rate limited & cached** | Redis-backed per-client-address limits protect `/ask`, `/ask/stream` and `/ingest` from a single caller monopolising the service; a question-embedding cache and a corpus-versioned answer cache mean an already-answered question costs nothing and answers instantly the second time. |
 | 🧪 **Measurable quality** *(planned)* | A reproducible eval suite will score retrieval hit-rate, faithfulness and relevance — and compare models head to head. |
 | 🔌 **MCP-native** *(planned)* | Will run as an MCP server, usable as a tool inside Claude Desktop / Cursor. |
 
@@ -53,37 +55,34 @@ flowchart TB
   end
 
   subgraph Query["💬 Query pipeline"]
-    CL["Web UI · REST"] --> RET["Retriever: vector + lexical fusion"]
+    CL["Web UI · REST"] --> CACHE[("Redis: embedding + answer cache")]
+    CACHE --> RET["Retriever: vector + lexical fusion"]
     RET --> VEC
-    RET --> LLM["LLM call (single provider)"]
-    LLM --> ANS["Answer + Citations"]
+    RET --> ROUTER["LLM Router: fallback chain"]
+    ROUTER --> P1["OpenAI"]
+    ROUTER --> P2["OpenRouter (opt-in)"]
+    ROUTER --> ANS["Answer + Citations"]
+    ANS --> LEDGER[("Cost & Token Ledger")]
   end
 
   subgraph Agentic["🤖 Agentic layer (planned)"]
     MCP["MCP"] --> AGENT["Agent Orchestrator"]
     AGENT --> TOOLS["Tools: retriever · web search"]
-    AGENT --> ROUTER["LLM Router + Fallback"]
-    ROUTER --> P1["OpenAI"]
-    ROUTER --> P2["Gemini"]
-    ROUTER --> P3["OpenRouter"]
   end
 
   TOOLS -.-> RET
-  ROUTER -.-> LLM
-  ROUTER -.-> COST[("Cost & Token Ledger")]
-  AGENT -.-> CACHE[("Redis Cache")]
 ```
 
 **Ingestion** turns sources into searchable knowledge: load → chunk (structure-aware: headings, fenced code and tables are never split) → embed → store in `pgvector`.
-**Query** answers a question today by retrieving relevant chunks (fused vector + full-text search), calling a single LLM, and returning a grounded answer with citations — or declining when nothing retrieved is close enough. The agent loop, multi-provider fallback, and cost/token logging are still ahead.
+**Query** answers a question today by checking the answer cache, retrieving relevant chunks (fused vector + full-text search) with their own embedding cache, routing the completion down a fallback-capable provider chain, and returning a grounded answer with citations — recording cost and token usage to a ledger, or declining when nothing retrieved is close enough. The agent loop is still ahead.
 
 ---
 
 ## Tech stack
 
 - **Runtime / framework:** Node.js 24 LTS · TypeScript (strict) · Nest.js
-- **Storage / vectors:** PostgreSQL + pgvector · Redis (cache)
-- **LLM access:** OpenAI embeddings (`text-embedding-3-large`) · OpenAI-compatible SDKs · OpenRouter *(routing planned)*
+- **Storage / vectors:** PostgreSQL + pgvector · Redis (cache, rate limiting)
+- **LLM access:** OpenAI embeddings (`text-embedding-3-large`) · completions via OpenAI-compatible SDKs, routed through a configurable fallback chain — a single OpenAI link by default, OpenRouter opt-in
 - **Agent tooling / MCP:** `@modelcontextprotocol/sdk`
 - **Evaluation:** promptfoo + LLM-as-judge
 - **Infra:** Docker · docker-compose · GitHub Actions (CI)
@@ -151,7 +150,7 @@ curl localhost:3000/sources/<sourceId>
 
 > **Known limitation:** ingestion runs in-process. If the service is interrupted
 > mid-run, the source is protected by a lease that expires after 15 minutes — after
-> that, a new run may reclaim it. A durable queue arrives with M3.
+> that, a new run may reclaim it. A durable queue is not yet built.
 
 Ask a question about the ingested corpus:
 
@@ -184,6 +183,34 @@ The same question can also be streamed token-by-token over SSE at `POST /ask/str
 
 A minimal chat page that drives both endpoints is served at `http://localhost:3000`.
 
+**Rate limits** protect `/ask` and `/ask/stream` (one shared budget — answering a question is what costs tokens, not which transport asked for it), `/ingest` (tighter still — it spends embeddings and holds a lease) and `/health` (a high ceiling, so a load balancer's own probes don't trip it). All four are per-client-address and configurable — see `THROTTLE_*` in `.env.example`. Past the limit, a request gets `429 Too Many Requests` with a `Retry-After` header; every response also echoes `X-RateLimit-Limit`/`-Remaining`/`-Reset`.
+
+Every answered or refused question is priced and logged to a cost ledger, aggregated at `GET /costs`:
+
+```bash
+curl localhost:3000/costs
+```
+
+```json
+{
+  "from": null,
+  "to": null,
+  "totals": {
+    "requests": 1,
+    "promptTokens": 4758,
+    "completionTokens": 465,
+    "cachedTokens": 0,
+    "usdCost": 0,
+    "unpricedRequests": 1
+  },
+  "byModel": [
+    { "provider": "openai", "model": "gpt-4.1-mini-2025-04-14", "requests": 1, "usdCost": 0, "unpricedRequests": 1 }
+  ]
+}
+```
+
+Accepts `?from=` / `?to=` (ISO 8601, `from` inclusive and `to` exclusive) to aggregate over a window instead of all time. `unpricedRequests` counts answers the price table couldn't cost — including, as in the example above, every real OpenAI answer under the default chain: OpenAI's own API echoes back the dated snapshot it actually served (`gpt-4.1-mini-2025-04-14`), not the alias requested (`gpt-4.1-mini`), and the price table is keyed on the alias. A repeated question served from the answer cache prices at `usdCost: 0` honestly (`cost_source: "cached"`), never `"unknown"` — it really did cost nothing, unlike an uncosted answer.
+
 ### Using docent inside Claude / Cursor (MCP)
 
 > 🚧 Planned — the MCP server exposes `search_kb`, `fetch_document` and `ask` as tools.
@@ -211,7 +238,7 @@ This makes it possible to answer, with numbers, *which* model and retrieval stra
 - [x] **M1 — Ingestion pipeline** (markdown loader, structure-aware chunking, embeddings, pgvector store)
 - [x] **M1.5 — Table handling** (HTML tables converted to markdown, never split across chunks)
 - [x] **M2 — Core RAG** (retriever, grounded answers with citations, streaming, minimal UI)
-- [ ] **M3 — Production engine** (multi-provider router + fallback, cost/token ledger, caching)
+- [x] **M3 — Production engine** (multi-provider router + fallback, cost/token ledger, caching)
 - [ ] **M4 — Agentic layer** (tool calling, multi-step planning, anti-hallucination guardrails)
 - [ ] **M5 — MCP server** (stdio + HTTP, tools exposed, Claude/Cursor integration)
 - [ ] **M6 — Evaluation suite** (dataset, metrics, LLM-as-judge, model comparison table)
