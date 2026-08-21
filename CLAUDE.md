@@ -272,6 +272,23 @@ anything that talks to the network or to the database.
   (`src/common/throttling/redis-throttler.storage.ts`) fails open for the same reason
   but not the same way: it bounds the wait with `withTimeout` first, because ordinary
   latency on a reachable Redis should not read as "no limit" either.
+- **Pricing is keyed by `configuredModel`, never by the `model` a response reports.**
+  `OpenAiCompatibleProvider` sets both on every `CompletionResult`/`StreamOutcome`:
+  `model` is what actually served the request, exactly as the provider's own response
+  names it; `configuredModel` is what the chain link was built with. OpenAI silently
+  resolves a requested alias (`gpt-4.1-mini`) to the dated snapshot that serves it
+  (`gpt-4.1-mini-2025-04-14`) and reports the snapshot on both the completion and every
+  streamed chunk — a string `MODEL_PRICES` was never keyed on and has no stable way to
+  be, since it changes without notice. `computeCost` (`src/cost/cost.calculator.ts`)
+  only ever receives `configuredModel`, so there is no served-model string in scope for
+  a future change to reach for by mistake. `model` still goes to the ledger's own
+  `model` column unmodified — a provider quietly serving a more specific model than
+  requested is worth recording, not normalising away; only the *price lookup* needed
+  the split. This bit twice independently, once per transport (`complete()` from
+  `response.model`, `stream()` — before this fix — from the closed-over configured
+  value regardless of what any chunk reported), so the two transports priced an
+  identically-served completion differently until both were pinned to read
+  `configuredModel` the same way.
 
 ## Security
 

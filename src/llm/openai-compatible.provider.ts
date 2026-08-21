@@ -69,6 +69,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     return {
       text: choice.message.content,
       model: response.model,
+      configuredModel: this.model,
       provider: this.providerName,
       finishReason: choice.finish_reason,
       usage: normaliseUsage(raw),
@@ -85,6 +86,10 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     const client = this.client;
     const model = this.model;
     const providerName = this.providerName;
+    // Falls back to the configured model only if no chunk ever carries one —
+    // real chunks always do (`ChatCompletionChunk.model` is not optional),
+    // so this only guards a test double or a wire format that omits it.
+    let servedModel = model;
 
     async function* tokens(): AsyncGenerator<string> {
       const response = await client.chat.completions.create({
@@ -108,6 +113,15 @@ export class OpenAiCompatibleProvider implements LlmProvider {
           reportedCostUsd = raw.cost ?? null;
         }
 
+        // Mirrors `finishReason` below: captured on every chunk rather than
+        // assumed to land on one identifiable as "the first" or "the last",
+        // since nothing here depends on it being stable across chunks —
+        // only that the value `complete()`'s equivalent (`response.model`)
+        // would have reported is the one `outcome()` ends up with.
+        if (chunk.model) {
+          servedModel = chunk.model;
+        }
+
         const choice = chunk.choices[0];
 
         // The finish reason arrives on the same chunk that carries the last
@@ -129,7 +143,8 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     const iterator = tokens();
 
     const outcome = (): StreamOutcome => ({
-      model,
+      model: servedModel,
+      configuredModel: model,
       provider: providerName,
       finishReason,
       usage,

@@ -7,6 +7,7 @@ function result(provider: string): CompletionResult {
   return {
     text: 'answer',
     model: 'm',
+    configuredModel: 'm',
     provider,
     finishReason: 'stop',
     usage: { promptTokens: 1, completionTokens: 1, cachedTokens: 0 },
@@ -45,6 +46,7 @@ function link(
         [Symbol.asyncIterator]: () => iterator,
         outcome: () => ({
           model: 'm',
+          configuredModel: 'm',
           provider,
           finishReason: 'stop',
           usage: null,
@@ -83,6 +85,7 @@ function withCustomClose(
     }),
     outcome: () => ({
       model: 'm',
+      configuredModel: 'm',
       provider: 'openai',
       finishReason: 'stop',
       usage: null,
@@ -211,6 +214,7 @@ describe('LlmRouter', () => {
           [Symbol.asyncIterator]: () => iterator,
           outcome: () => ({
             model: 'm',
+            configuredModel: 'm',
             provider: 'openai',
             finishReason: 'stop',
             usage: null,
@@ -441,6 +445,7 @@ describe('LlmRouter', () => {
         }),
         outcome: () => ({
           model: 'm',
+          configuredModel: 'm',
           provider: 'openai',
           finishReason: 'stop',
           usage: null,
@@ -474,6 +479,7 @@ describe('LlmRouter', () => {
         }),
         outcome: () => ({
           model: 'm',
+          configuredModel: 'm',
           provider: 'openai',
           finishReason: 'stop',
           usage: null,

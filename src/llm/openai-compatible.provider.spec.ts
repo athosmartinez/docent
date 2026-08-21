@@ -29,6 +29,27 @@ describe('OpenAiCompatibleProvider', () => {
     expect(result.provider).toBe('openai');
   });
 
+  // OpenAI resolves the alias requested to the dated snapshot that actually
+  // served it and echoes the snapshot back as `model` — `configuredModel`
+  // is what pricing looks up, and it has to stay the alias regardless of
+  // what the response reports, or every real completion mis-keys the price
+  // table lookup.
+  it('keeps the configured model separate from whatever the provider served', async () => {
+    const client = clientReturning({
+      model: 'gpt-4.1-mini-2025-04-14',
+      choices: [{ message: { content: 'the answer' }, finish_reason: 'stop' }],
+    });
+
+    const result = await new OpenAiCompatibleProvider(
+      client,
+      'openai',
+      'gpt-4.1-mini',
+    ).complete(request);
+
+    expect(result.model).toBe('gpt-4.1-mini-2025-04-14');
+    expect(result.configuredModel).toBe('gpt-4.1-mini');
+  });
+
   it('sends system and user as separate messages', async () => {
     const create = jest.fn().mockResolvedValue({
       model: 'm',
@@ -239,11 +260,77 @@ describe('OpenAiCompatibleProvider', () => {
     );
     expect(stream.outcome()).toEqual({
       model: 'google/gemini-2.5-flash',
+      configuredModel: 'google/gemini-2.5-flash',
       provider: 'openrouter',
       finishReason: 'stop',
       usage: { promptTokens: 7, completionTokens: 1, cachedTokens: 0 },
       reportedCostUsd: 0.0001,
       modelReason: 'primary',
     });
+  });
+
+  // The streaming twin of the `complete()` case above: real chunks always
+  // carry `model` (`ChatCompletionChunk.model` is not optional), and it
+  // reports the same resolved snapshot `response.model` would on the
+  // non-streaming path. Before this test, `stream()`'s `outcome().model`
+  // was always the configured alias regardless of what any chunk reported —
+  // so the two transports priced identically-served completions
+  // differently: `complete()` recorded the (unpriced) snapshot, `stream()`
+  // recorded the (priced) alias.
+  it('keeps the configured model separate from whatever the provider served, on the streaming path too', async () => {
+    function* chunks() {
+      yield {
+        model: 'gpt-4.1-mini-2025-04-14',
+        choices: [{ delta: { content: 'hi' } }],
+      };
+      yield {
+        model: 'gpt-4.1-mini-2025-04-14',
+        choices: [{ delta: {}, finish_reason: 'stop' }],
+      };
+    }
+
+    const create = jest.fn().mockResolvedValue(chunks());
+    const client = { chat: { completions: { create } } } as unknown as OpenAI;
+
+    const stream = new OpenAiCompatibleProvider(
+      client,
+      'openai',
+      'gpt-4.1-mini',
+    ).stream(request);
+
+    for await (const delta of stream) {
+      void delta;
+    }
+
+    expect(stream.outcome().model).toBe('gpt-4.1-mini-2025-04-14');
+    expect(stream.outcome().configuredModel).toBe('gpt-4.1-mini');
+  });
+
+  // A test double (or a wire format) that never sets `chunk.model` must not
+  // leave `model` undefined or empty — it falls back to the configured
+  // model, the same value `outcome().model` always reported before this
+  // fix, so a missing field degrades to the old behaviour rather than to
+  // nothing.
+  it('falls back to the configured model when no chunk ever reports one', async () => {
+    function* chunks() {
+      yield { choices: [{ delta: { content: 'hi' } }] };
+      yield { choices: [{ delta: {}, finish_reason: 'stop' }] };
+    }
+
+    const create = jest.fn().mockResolvedValue(chunks());
+    const client = { chat: { completions: { create } } } as unknown as OpenAI;
+
+    const stream = new OpenAiCompatibleProvider(
+      client,
+      'openai',
+      'gpt-4.1-mini',
+    ).stream(request);
+
+    for await (const delta of stream) {
+      void delta;
+    }
+
+    expect(stream.outcome().model).toBe('gpt-4.1-mini');
+    expect(stream.outcome().configuredModel).toBe('gpt-4.1-mini');
   });
 });

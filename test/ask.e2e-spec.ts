@@ -59,6 +59,7 @@ function llmStream(
     [Symbol.asyncIterator]: () => iterator,
     outcome: () => ({
       model: 'stub-model',
+      configuredModel: 'stub-model',
       provider: 'stub',
       finishReason,
       usage: null,
@@ -73,6 +74,7 @@ const stubLlm: LlmProvider = {
     Promise.resolve({
       text: 'Use the marker option [1].',
       model: 'stub-model',
+      configuredModel: 'stub-model',
       provider: 'stub',
       finishReason: 'stop',
       usage: null,

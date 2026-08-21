@@ -18,7 +18,22 @@ export interface TokenUsage {
 
 export interface CompletionResult {
   text: string;
+  /**
+   * What actually served the request, as the provider's own response
+   * reports it — OpenAI echoes the dated snapshot it resolved the alias to
+   * (`gpt-4.1-mini-2025-04-14`), not the alias configured. Worth recording
+   * exactly as reported: a provider quietly serving a more specific model
+   * than requested is information, not noise to normalise away. Never used
+   * to look up a price — see `configuredModel`.
+   */
   model: string;
+  /**
+   * The model this link was configured with (`ChainLink.model`), known at
+   * construction rather than read off the response. This is what
+   * `computeCost` prices by: the price table is keyed on what was asked
+   * for, and a provider's more specific echo would only ever miss it.
+   */
+  configuredModel: string;
   provider: string;
   finishReason: string;
   /** null when the provider reported no usage at all. */
@@ -40,7 +55,10 @@ export interface CompletionResult {
  * yields the partial picture, not an error.
  */
 export interface StreamOutcome {
+  /** See `CompletionResult.model` — the same served-vs-configured split. */
   model: string;
+  /** See `CompletionResult.configuredModel`. */
+  configuredModel: string;
   provider: string;
   finishReason: string | null;
   usage: TokenUsage | null;

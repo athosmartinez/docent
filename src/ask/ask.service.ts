@@ -296,6 +296,7 @@ export class AskService {
   private buildCost(outcome: {
     provider: string;
     model: string;
+    configuredModel: string;
     usage: TokenUsage | null;
     reportedCostUsd: number | null;
     modelReason: string;

@@ -196,20 +196,20 @@ curl localhost:3000/costs
   "from": null,
   "to": null,
   "totals": {
-    "requests": 1,
-    "promptTokens": 4758,
-    "completionTokens": 465,
+    "requests": 28,
+    "promptTokens": 21996,
+    "completionTokens": 2384,
     "cachedTokens": 0,
-    "usdCost": 0,
-    "unpricedRequests": 1
+    "usdCost": 0.00177,
+    "unpricedRequests": 4
   },
   "byModel": [
-    { "provider": "openai", "model": "gpt-4.1-mini-2025-04-14", "requests": 1, "usdCost": 0, "unpricedRequests": 1 }
+    { "provider": "openai", "model": "gpt-4.1-mini-2025-04-14", "requests": 28, "usdCost": 0.00177, "unpricedRequests": 4 }
   ]
 }
 ```
 
-Accepts `?from=` / `?to=` (ISO 8601, `from` inclusive and `to` exclusive) to aggregate over a window instead of all time. `unpricedRequests` counts answers the price table couldn't cost — including, as in the example above, every real OpenAI answer under the default chain: OpenAI's own API echoes back the dated snapshot it actually served (`gpt-4.1-mini-2025-04-14`), not the alias requested (`gpt-4.1-mini`), and the price table is keyed on the alias. A repeated question served from the answer cache prices at `usdCost: 0` honestly (`cost_source: "cached"`), never `"unknown"` — it really did cost nothing, unlike an uncosted answer.
+Accepts `?from=` / `?to=` (ISO 8601, `from` inclusive and `to` exclusive) to aggregate over a window instead of all time. Pricing is looked up by the model each chain link was *configured* with (`LLM_CHAIN`), not by whatever string the provider's response happens to echo as `model` — OpenAI resolves a requested alias to the dated snapshot that actually served it (`gpt-4.1-mini-2025-04-14`) and reports the snapshot, which the ledger's `model` column keeps recording exactly as served; pricing would silently miss on every real call if it looked the snapshot up instead of the configured alias. `unpricedRequests` counts answers where neither the provider reported a cost nor the *configured* model was in the price table — a link genuinely not in `model-prices.ts`, or a completion the provider reported no usage for at all. A repeated question served from the answer cache prices at `usdCost: 0` honestly (`cost_source: "cached"`), never `"unknown"` — it really did cost nothing, unlike an uncosted answer.
 
 ### Using docent inside Claude / Cursor (MCP)
 

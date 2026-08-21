@@ -19,10 +19,20 @@ const PER_MILLION = 1_000_000;
  * an unpriced or usage-less call comes back `unknown`, never `0`, because a
  * silent zero would sum into a total as though the call had been measured
  * and found free.
+ *
+ * Priced by `configuredModel`, never by whatever the provider's response
+ * happened to echo as `model`. OpenAI resolves a requested alias
+ * (`gpt-4.1-mini`) to the dated snapshot that actually served it
+ * (`gpt-4.1-mini-2025-04-14`) and reports the snapshot — a string
+ * `MODEL_PRICES` was never keyed on and has no way to be, since it changes
+ * without notice. `configuredModel` is what the chain link was built with,
+ * known at construction rather than inferred from the response, so pricing
+ * a link the table does price never depends on guessing which part of a
+ * vendor's naming convention to strip.
  */
 export function computeCost(input: {
   provider: string;
-  model: string;
+  configuredModel: string;
   usage: TokenUsage | null;
   reportedCostUsd: number | null;
 }): ComputedCost {
@@ -30,7 +40,7 @@ export function computeCost(input: {
     return { usdCost: input.reportedCostUsd, costSource: 'reported' };
   }
 
-  const price = MODEL_PRICES[`${input.provider}:${input.model}`];
+  const price = MODEL_PRICES[`${input.provider}:${input.configuredModel}`];
 
   if (!input.usage || !price) {
     return { usdCost: null, costSource: 'unknown' };

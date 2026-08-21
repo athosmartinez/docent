@@ -12,7 +12,7 @@ describe('computeCost', () => {
     expect(
       computeCost({
         provider: 'openrouter',
-        model: 'google/gemini-2.5-flash',
+        configuredModel: 'google/gemini-2.5-flash',
         usage,
         reportedCostUsd: 0.0042,
       }),
@@ -26,7 +26,7 @@ describe('computeCost', () => {
     expect(
       computeCost({
         provider: 'openai',
-        model: 'gpt-4.1-mini',
+        configuredModel: 'gpt-4.1-mini',
         usage,
         reportedCostUsd: null,
       }),
@@ -45,7 +45,7 @@ describe('computeCost', () => {
 
     const half = computeCost({
       provider: 'openai',
-      model: 'gpt-4.1-mini',
+      configuredModel: 'gpt-4.1-mini',
       usage: {
         promptTokens: 1_000_000,
         completionTokens: 0,
@@ -64,7 +64,7 @@ describe('computeCost', () => {
     expect(
       computeCost({
         provider: 'openai',
-        model: 'a-model-nobody-priced',
+        configuredModel: 'a-model-nobody-priced',
         usage,
         reportedCostUsd: null,
       }),
@@ -75,7 +75,7 @@ describe('computeCost', () => {
     expect(
       computeCost({
         provider: 'openai',
-        model: 'gpt-4.1-mini',
+        configuredModel: 'gpt-4.1-mini',
         usage: null,
         reportedCostUsd: null,
       }),
@@ -91,8 +91,47 @@ describe('computeCost', () => {
     expect(
       computeCost({
         provider: 'openai',
-        model: 'gpt-4.1-mini',
+        configuredModel: 'gpt-4.1-mini',
         usage: { promptTokens: 100, cachedTokens: 150, completionTokens: 0 },
+        reportedCostUsd: null,
+      }),
+    ).toEqual({ usdCost: null, costSource: 'unknown' });
+  });
+
+  // The defect this pins: a provider's response can report a more specific
+  // model id than what was configured (OpenAI resolves an alias to the
+  // dated snapshot that served it) — computeCost has no `model` field to
+  // receive that on any more, only `configuredModel`, so there is nothing
+  // for a served-model string to accidentally reach the price table with.
+  it('prices by the configured model regardless of what the provider echoes as served, since only the configured one is ever passed in', () => {
+    const price = MODEL_PRICES['openai:gpt-4.1-mini'];
+    if (!price) throw new Error('fixture price missing');
+
+    // No `model` field exists on the input at all — this is the type-level
+    // half of the fix: there is no served-model string in scope here for a
+    // future change to reach for by mistake.
+    const result = computeCost({
+      provider: 'openai',
+      configuredModel: 'gpt-4.1-mini',
+      usage,
+      reportedCostUsd: null,
+    });
+
+    expect(result).toEqual({
+      usdCost: price.inputPerMillion + price.outputPerMillion,
+      costSource: 'table',
+    });
+  });
+
+  // A link genuinely absent from the price table must still come back
+  // unknown after the fix — the fix threads the *configured* model through
+  // more reliably, it must not make "unpriced" unreachable.
+  it('still reports unknown for a configured model genuinely absent from the price table', () => {
+    expect(
+      computeCost({
+        provider: 'openai',
+        configuredModel: 'gpt-4.1-mini-2025-04-14', // a real snapshot id, not in MODEL_PRICES
+        usage,
         reportedCostUsd: null,
       }),
     ).toEqual({ usdCost: null, costSource: 'unknown' });

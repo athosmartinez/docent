@@ -161,6 +161,7 @@ export class LlmRouter implements LlmProvider {
           ? { ...chosen.outcome(), modelReason: reason }
           : {
               model: 'unknown',
+              configuredModel: 'unknown',
               provider: 'unknown',
               finishReason: null,
               usage: null,

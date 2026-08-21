@@ -1,6 +1,7 @@
 import { answerKey } from '../common/cache/cache.keys';
 import type { CacheService } from '../common/cache/cache.service';
 import type { CorpusVersion } from '../common/cache/corpus-version';
+import { MODEL_PRICES } from '../cost/model-prices';
 import { AskService } from './ask.service';
 import type { RetrievalService } from '../retrieval/retrieval.service';
 import type {
@@ -27,6 +28,7 @@ const chunk = (id: string): RetrievedChunk => ({
 
 const outcome = (overrides: Partial<StreamOutcome> = {}): StreamOutcome => ({
   model: 'gpt-4.1-mini',
+  configuredModel: 'gpt-4.1-mini',
   provider: 'openai',
   finishReason: 'stop',
   usage: null,
@@ -115,6 +117,7 @@ function build(
   const completion: CompletionResult = {
     text: 'the answer [1]',
     model: 'gpt-4.1-mini',
+    configuredModel: 'gpt-4.1-mini',
     provider: 'openai',
     finishReason: 'stop',
     usage: null,
@@ -750,6 +753,114 @@ describe('ask() and recordStreamed() store the same shape', () => {
 
     expect(recordedInput(askRecord)).toMatchObject(answered);
     expect(recordedInput(streamRecord)).toMatchObject(answered);
+  });
+
+  // The defect this pins: OpenAI resolves a requested alias to the dated
+  // snapshot that actually served it and echoes the snapshot back as
+  // `model` — a string `MODEL_PRICES` was never keyed on. Pricing has to
+  // look up `configuredModel` (what the chain link was built with, known
+  // rather than inferred) instead, on both transports identically, while
+  // the ledger's own `model` column keeps recording the snapshot that
+  // really served it — a provider quietly serving a more specific model
+  // than requested is worth keeping, not normalising away.
+  //
+  // Asserted against `price` from `MODEL_PRICES` directly (not a number
+  // copied out of `cost.calculator.spec.ts`), so this fails if that table's
+  // entry ever changes, and both paths are compared to that one independent
+  // figure rather than only to each other — agreement alone would not catch
+  // both sides sharing the same wrong constant.
+  it('prices by the configured model even when the provider served a different one, identically on both transports', async () => {
+    const price = MODEL_PRICES['openai:gpt-4.1-mini'];
+    if (!price) throw new Error('fixture price missing');
+
+    const served = {
+      provider: 'openai',
+      model: 'gpt-4.1-mini-2025-04-14', // what the response echoed
+      configuredModel: 'gpt-4.1-mini', // what the chain link was built with
+      usage: {
+        promptTokens: 1_000_000,
+        completionTokens: 1_000_000,
+        cachedTokens: 0,
+      },
+      reportedCostUsd: null,
+    };
+    const expectedCost = {
+      provider: 'openai',
+      model: 'gpt-4.1-mini-2025-04-14',
+      promptTokens: 1_000_000,
+      completionTokens: 1_000_000,
+      cachedTokens: 0,
+      usdCost: price.inputPerMillion + price.outputPerMillion,
+      costSource: 'table',
+      modelReason: 'primary',
+    };
+
+    const { service: askService, record: askRecord } = build(
+      { chunks: [chunk('a')], bestDistance: 0.3 },
+      0.5,
+      served,
+    );
+    const { service: streamService, record: streamRecord } = build({
+      chunks: [chunk('a')],
+      bestDistance: 0.3,
+    });
+
+    await askService.ask('how?');
+    await streamService.recordStreamed(
+      'how?',
+      [chunk('a')],
+      'the streamed answer [1]',
+      outcome(served),
+    );
+
+    expect(recordedInput(askRecord).cost).toEqual(expectedCost);
+    expect(recordedInput(streamRecord).cost).toEqual(expectedCost);
+  });
+
+  // The other half of the same fix, proven end to end rather than only at
+  // `computeCost`'s own unit level: a configured model genuinely absent
+  // from the price table must still come back unknown on both transports —
+  // threading `configuredModel` through more reliably must not make
+  // "unpriced" unreachable.
+  it('still records unknown, on both transports, for a configured model absent from the price table', async () => {
+    const unpriced = {
+      provider: 'openai',
+      model: 'gpt-4.1-mini-2025-04-14',
+      configuredModel: 'gpt-4.1-mini-2025-04-14', // a real snapshot id, not in MODEL_PRICES
+      usage: {
+        promptTokens: 1_000_000,
+        completionTokens: 1_000_000,
+        cachedTokens: 0,
+      },
+      reportedCostUsd: null,
+    };
+
+    const { service: askService, record: askRecord } = build(
+      { chunks: [chunk('a')], bestDistance: 0.3 },
+      0.5,
+      unpriced,
+    );
+    const { service: streamService, record: streamRecord } = build({
+      chunks: [chunk('a')],
+      bestDistance: 0.3,
+    });
+
+    await askService.ask('how?');
+    await streamService.recordStreamed(
+      'how?',
+      [chunk('a')],
+      'the streamed answer [1]',
+      outcome(unpriced),
+    );
+
+    expect(recordedInput(askRecord).cost).toMatchObject({
+      costSource: 'unknown',
+      usdCost: null,
+    });
+    expect(recordedInput(streamRecord).cost).toMatchObject({
+      costSource: 'unknown',
+      usdCost: null,
+    });
   });
 });
 
