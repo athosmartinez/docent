@@ -37,6 +37,10 @@ const stringFromConfig = (key: 'EMBEDDING_MODEL') => ({
     numberFromConfig('CACHE_EMBEDDING_TTL_S'),
     stringFromConfig('EMBEDDING_MODEL'),
   ],
-  exports: [RetrievalRepository, RetrievalService],
+  // 'EMBEDDING_MODEL' is exported alongside the two services so AskModule
+  // (which already imports this module) can fold it into the answer cache
+  // key without a second factory reading the same config value — see
+  // cache.keys.ts's answeringConfigFingerprint for why it needs to.
+  exports: [RetrievalRepository, RetrievalService, 'EMBEDDING_MODEL'],
 })
 export class RetrievalModule {}

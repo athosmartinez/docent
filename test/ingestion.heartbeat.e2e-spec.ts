@@ -133,11 +133,18 @@ describe('ingestion lease heartbeat', () => {
     // lease — so aging it past the (tiny, for this file) lease window is
     // indistinguishable from a run whose process is actually gone.
     const staleId = await repository.createSource(SOURCE, 'docs');
+    // Anchored on the database's own clock, the same one `reuse()` computes
+    // `staleBefore` from — not the application's `Date.now()`. The two can
+    // disagree (see the skewed-clock test below for how far), and aging this
+    // row from the wrong clock would make the margin between "reclaimed" and
+    // "still live" a function of host/database clock drift rather than of
+    // HOLD_MS itself, exactly the defect this file exists to guard against.
+    const dbNow = await repository.databaseNow();
     await db
       .updateTable('sources')
       .set({
         status: 'processing',
-        updated_at: new Date(Date.now() - HOLD_MS),
+        updated_at: new Date(dbNow.getTime() - HOLD_MS),
       })
       .where('id', '=', staleId)
       .execute();

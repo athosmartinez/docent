@@ -33,15 +33,51 @@ export function embeddingKey(
 /**
  * The question's identity, independent of any corpus version — a hash of
  * the normalised text and nothing else. Shared by `answerKey` below (which
- * namespaces it under a version) and by anything that needs to identify a
- * question without exposing its text: a failure log line naming *which*
- * question failed carries this instead of the question itself, and it is
- * the identical hash `answerKey` uses, so the two are directly joinable —
- * given a hash from a log line and a known corpus version, `ans:<version>:
- * <hash>` is the exact key to check.
+ * namespaces it under a version and an answering-configuration fingerprint)
+ * and by anything that needs to identify a question without exposing its
+ * text: a failure log line naming *which* question failed carries this
+ * instead of the question itself, and it is the identical hash `answerKey`
+ * uses, so the two are directly joinable — given a hash from a log line, a
+ * known corpus version and the currently-running answering configuration,
+ * `ans:<version>:<configFingerprint>:<hash>` is the exact key to check.
  */
 export function questionHash(question: string): string {
   return sha256(normaliseQuestion(question));
+}
+
+/**
+ * The subset of runtime configuration that changes what "the answer to this
+ * question" means, independent of the corpus and the question text itself —
+ * folded into `answerKey` the way `embeddingKey` already folds in its own
+ * model/dimensionality. `llmChain` changes which model(s) can answer at
+ * all; `groundingMaxDistance` changes whether a question is a refusal or an
+ * answer — explicitly a knob `npm run calibrate:floor` re-derives, so
+ * turning it must not silently keep serving what it replaced; and
+ * `embeddingModel` changes what retrieval considers close enough, hence
+ * both the grounding decision and which chunks get cited. Changing any of
+ * these and restarting, without this fingerprint, would keep serving every
+ * answer *and refusal* cached under the old configuration for up to
+ * `CACHE_ANSWER_TTL_S` — the config appearing to do nothing.
+ *
+ * `RETRIEVAL_TOP_N`/`RETRIEVAL_TOP_K`/`RRF_K` also influence which chunks a
+ * grounded answer cites and are a known, smaller residual gap this does not
+ * yet close — see `_planning/03-roadmap.md`'s M3 debt.
+ *
+ * `EMBEDDING_DIMENSIONS` is deliberately absent: `env.schema.ts` refines it
+ * to always equal `CHUNK_EMBEDDING_DIMENSIONS` at boot, so unlike
+ * `embeddingKey`'s own dimensionality input it can never actually vary —
+ * there is no configuration here to invalidate against.
+ */
+export interface AnsweringConfig {
+  llmChain: string;
+  groundingMaxDistance: number;
+  embeddingModel: string;
+}
+
+export function answeringConfigFingerprint(config: AnsweringConfig): string {
+  return sha256(
+    `${config.llmChain}:${config.groundingMaxDistance}:${config.embeddingModel}`,
+  );
 }
 
 /**
@@ -58,9 +94,27 @@ export function questionHash(question: string): string {
  * invalidates by making a changed corpus compute a different key, not by
  * guaranteeing every change does. Nothing has to walk Redis and delete
  * anything for the cases it does cover.
+ *
+ * The caller is responsible for reading `version` once and reusing it for
+ * both the cache lookup and the eventual write: retrieval and the
+ * completion call both take real time, and a corpus change landing in that
+ * window must not let the read and the write disagree about which version
+ * the answer belongs to — the exact race that used to file a C1-grounded
+ * answer under the key a newer, C2 corpus would compute (`AskService`'s
+ * `cachedAnswer`/`writeCache` thread a single read through both call sites
+ * for this reason).
+ *
+ * `configFingerprint` is `answeringConfigFingerprint`'s output, not the raw
+ * config: `answerKey` only assembles identity from pieces its caller has
+ * already reduced to strings, the same division of labour `embeddingKey`
+ * keeps between itself and its own model/dimensionality inputs.
  */
-export function answerKey(version: string, question: string): string {
-  return `ans:${version}:${questionHash(question)}`;
+export function answerKey(
+  version: string,
+  question: string,
+  configFingerprint: string,
+): string {
+  return `ans:${version}:${configFingerprint}:${questionHash(question)}`;
 }
 
 /**

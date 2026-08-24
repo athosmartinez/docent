@@ -121,18 +121,26 @@ export const envSchema = z
       .int()
       .positive()
       .default(2_592_000),
-    // Also bounds memory only, in the same sense as CACHE_EMBEDDING_TTL_S,
-    // for a source added or removed: the key already carries the corpus
-    // version, so either always invalidates the entry by changing its key.
-    // Re-ingesting an existing source does too only when its refreshed
-    // timestamp becomes the newest among ready sources — this TTL is the
-    // backstop for the cases it doesn't. Seven days.
+    // Bounds memory the same way CACHE_EMBEDDING_TTL_S does, but only for
+    // *corpus* changes: for a source added or removed, the key already
+    // carries the corpus version, so either always invalidates the entry by
+    // changing its key. Re-ingesting an existing source does too only when
+    // its refreshed timestamp becomes the newest among ready sources — this
+    // TTL is the backstop for the cases it doesn't. It is not a backstop for
+    // *answering-configuration* changes (LLM_CHAIN, GROUNDING_MAX_DISTANCE,
+    // EMBEDDING_MODEL) — those invalidate unconditionally too, the same way
+    // a corpus change does, because the key also carries a fingerprint of
+    // that configuration (see cache.keys.ts's answeringConfigFingerprint).
+    // Seven days.
     CACHE_ANSWER_TTL_S: z.coerce.number().int().positive().default(604_800),
-    // Rate limits, all requests-per-minute per client address. The default
-    // applies to every route without its own override; /ask and
-    // /ask/stream (one shared budget — see ask.controller.ts) and /ingest
-    // get tighter ones because they spend tokens and embeddings
-    // respectively, not just server time.
+    // Rate limits, all requests-per-minute per client address. Every route
+    // without its own override gets its own bucket at
+    // THROTTLE_DEFAULT_PER_MINUTE — per route, not a budget the default
+    // routes share, so a client hitting two such routes has that much
+    // budget on each, not split between them. /ask and /ask/stream are the
+    // one deliberate exception (one shared budget — see ask.controller.ts);
+    // /ingest gets a tighter limit of its own because it spends embeddings
+    // and holds a lease, not just server time.
     THROTTLE_DEFAULT_PER_MINUTE: z.coerce.number().int().positive().default(60),
     THROTTLE_ASK_PER_MINUTE: z.coerce.number().int().positive().default(10),
     THROTTLE_INGEST_PER_MINUTE: z.coerce.number().int().positive().default(2),

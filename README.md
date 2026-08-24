@@ -37,7 +37,7 @@ Unlike a typical demo chatbot, `docent` is built like a real backend service, in
 | 📚 **Grounded, not guessing** | Every answer cites the exact source chunks it used, retrieved by fusing a vector search and a full-text search over the corpus. When nothing retrieved is close enough to the question, it refuses instead of guessing — `answer: null`, `citations: []`, `grounded: false` — without ever calling the LLM. The distance threshold is measured against the corpus, not chosen by hand. |
 | 🤖 **Agentic retrieval** *(planned)* | The model will use tools in multiple steps (search, fetch, plan) instead of a single naive lookup. |
 | 🔀 **Resilient by design** | A completion is routed down a configurable provider chain, one link at a time; on any failure it falls through to the next link, attributing each failure to the link that produced it, and refuses to repeat a `provider:model` pair. The chain ships with a single OpenAI link by default — a fresh clone only needs `OPENAI_API_KEY` — and a second, OpenRouter, link is opt-in via `LLM_CHAIN` (see `.env.example`). |
-| 💰 **Cost-aware** | Every answered or refused question writes a row to a cost ledger — tokens, USD cost when the model is in the price table, which link answered and why — and `GET /costs?from&to` aggregates it over a time window, by provider and model. |
+| 💰 **Cost-aware** | Every *answered* question writes a row to a cost ledger — tokens, USD cost when the model is in the price table, which link answered and why. A refusal never calls a model, so it writes no ledger row (the question and its refusal are still recorded elsewhere) — and `GET /costs?from&to` aggregates the ledger over a time window, by provider and model. |
 | 🚦 **Rate limited & cached** | Redis-backed per-client-address limits protect `/ask`, `/ask/stream` and `/ingest` from a single caller monopolising the service; a question-embedding cache and a corpus-versioned answer cache mean an already-answered question costs nothing and answers instantly the second time. |
 | 🧪 **Measurable quality** *(planned)* | A reproducible eval suite will score retrieval hit-rate, faithfulness and relevance — and compare models head to head. |
 | 🔌 **MCP-native** *(planned)* | Will run as an MCP server, usable as a tool inside Claude Desktop / Cursor. |
@@ -106,6 +106,17 @@ npm install
 npm run migrate
 npm run start:dev             # API on http://localhost:3000
 ```
+
+`docker-compose.yml`'s Redis caps itself at `--maxmemory 256mb --maxmemory-policy
+allkeys-lru`, so once full it evicts the least-recently-used key instead of refusing
+writes — every key this service keeps in Redis (the embedding cache, the answer
+cache, rate-limit counters) already carries a TTL, so eviction never throws away
+anything that was not already going to expire on its own. **That is local/CI
+configuration only.** A production Redis, or any Redis this service does not start
+itself, needs its operator to set an equivalent `maxmemory`/`maxmemory-policy`
+independently — nothing in this application configures a Redis server it did not
+launch, and the default `noeviction` policy makes a full Redis refuse writes instead,
+which silently disables the rate limiter (see `src/common/throttling/redis-throttler.storage.ts`).
 
 Verify it came up:
 
@@ -185,7 +196,7 @@ A minimal chat page that drives both endpoints is served at `http://localhost:30
 
 **Rate limits** protect `/ask` and `/ask/stream` (one shared budget — answering a question is what costs tokens, not which transport asked for it), `/ingest` (tighter still — it spends embeddings and holds a lease) and `/health` (a high ceiling, so a load balancer's own probes don't trip it). All four are per-client-address and configurable — see `THROTTLE_*` in `.env.example`. Past the limit, a request gets `429 Too Many Requests` with a `Retry-After` header; every response also echoes `X-RateLimit-Limit`/`-Remaining`/`-Reset`.
 
-Every answered or refused question is priced and logged to a cost ledger, aggregated at `GET /costs`:
+Every *answered* question is priced and logged to a cost ledger; a refusal never calls a model, so it costs nothing and writes no ledger row. `GET /costs` aggregates the ledger over a time window:
 
 ```bash
 curl localhost:3000/costs

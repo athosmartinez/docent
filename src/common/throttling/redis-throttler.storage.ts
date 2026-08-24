@@ -68,6 +68,28 @@ const OPEN: ThrottlerStorageRecord = {
 // 2.30–3.23s this bound was introduced to fix.
 const REDIS_TIMEOUT_MS = 1_000;
 
+// Every Redis error reply's text begins with an upper-case error code word
+// before its human-readable message — OOM, ERR, WRONGTYPE, NOSCRIPT, NOPERM,
+// and so on — a documented part of the protocol, not a guess about this
+// particular message's wording. Checked against `.message` because
+// `redis-errors`' `ReplyError` carries Redis's reply text verbatim there and
+// exposes nothing more structured; measured live against a Redis started
+// with `--maxmemory 1mb --maxmemory-policy noeviction`: `OOM command not
+// allowed when used memory > 'maxmemory'.`
+//
+// Takes `unknown` rather than `ReplyError` — ioredis exports that class
+// typed as `any` (see the cast this file's own spec builds around it), so
+// TypeScript cannot narrow an `instanceof ReplyError` check to it as a
+// parameter type; duck-typing `.message` here avoids relying on that.
+function isOutOfMemory(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+
+  const message = (error as { message?: unknown }).message;
+  return typeof message === 'string' && message.startsWith('OOM');
+}
+
 // KEYS[1] the counter key, ARGV[1] the window in milliseconds. INCR and the
 // conditional PEXPIRE run inside one EVAL — Redis executes a script as a
 // single atomic step, so nothing else this client or any other client sends
@@ -121,12 +143,17 @@ return {totalHits, pttl}
  * indefinitely, which `withTimeout` below is what closes.
  *
  * That failure mode is deliberately not the same for every kind of error,
- * though: a `ReplyError` means Redis received the script and rejected it —
- * wrong arity, a Lua error, an ACL that disallows EVAL — which is always a
- * bug in this class, never a transient condition the way a dropped
- * connection or a timeout is. Logging it at the same severity as an
- * unreachable Redis would bury a real bug in ordinary operational noise;
- * see `increment`'s catch block.
+ * though: most of what surfaces as a `ReplyError` — wrong arity, a Lua
+ * error, an ACL that disallows EVAL — really is always a bug in this class,
+ * never a transient condition the way a dropped connection or a timeout is.
+ * Logging it at the same severity as an unreachable Redis would bury a real
+ * bug in ordinary operational noise. But Redis also replies with a
+ * `ReplyError` when it is simply out of memory and refusing writes (`-OOM
+ * command not allowed when used memory > 'maxmemory'`) — a real operational
+ * condition, not a defect in this class or its permissions, and telling an
+ * operator otherwise sends them to read a script that is not the problem
+ * instead of Redis's own memory and eviction policy. See `increment`'s
+ * catch block for how the two are told apart.
  */
 @Injectable()
 export class RedisThrottlerStorage implements ThrottlerStorage {
@@ -186,7 +213,19 @@ export class RedisThrottlerStorage implements ThrottlerStorage {
 
       return { totalHits, timeToExpire, isBlocked, timeToBlockExpire };
     } catch (error: unknown) {
-      if (error instanceof ReplyError) {
+      if (error instanceof ReplyError && isOutOfMemory(error)) {
+        // Redis's own maxmemory/eviction configuration is what determines
+        // whether this ever fires (docker-compose.yml sets an eviction
+        // policy specifically to make this unreachable in the stack this
+        // repository starts) — but a Redis this service does not start
+        // itself may not be configured that way, so the check still has to
+        // exist. Logged separately from the branch below: this is a real
+        // capacity condition, and telling the operator it is "a bug in the
+        // script" would send them to read code that is not the problem.
+        this.logger.error(
+          `rate limit check rejected by Redis for ${redisKey} — Redis is out of memory and refusing writes (see its maxmemory/maxmemory-policy configuration), and it is allowing every request through unthrottled until Redis has room again: ${describeError(error)}`,
+        );
+      } else if (error instanceof ReplyError) {
         this.logger.error(
           `rate limit check rejected by Redis for ${redisKey} — this is a bug in the script or the connection's permissions, not an outage, and it is allowing every request through unthrottled until fixed: ${describeError(error)}`,
         );

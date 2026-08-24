@@ -141,7 +141,10 @@ export class AskController {
     res.flushHeaders();
 
     try {
-      const cached = await this.service.cachedAnswer(question);
+      // Read once, here, and reused for whatever write follows below —
+      // never re-read after retrieval or the completion call, which is
+      // exactly the race AskService.writeCache's docstring explains.
+      const { version, cached } = await this.service.cachedAnswer(question);
 
       if (cached) {
         // A hit is served in the same event order and shape a fresh answer
@@ -168,7 +171,7 @@ export class AskController {
       if (!chunks) {
         sse(res, 'citations', []);
         sse(res, 'done', { grounded: false });
-        await this.service.recordRefusal(question);
+        await this.service.recordRefusal(question, version);
         res.end();
         return;
       }
@@ -196,6 +199,7 @@ export class AskController {
         chunks,
         answer,
         stream.outcome(),
+        version,
       );
     } catch (error: unknown) {
       // The status line is long gone by now, so a failure can only be

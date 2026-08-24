@@ -18,10 +18,11 @@ drives both endpoints.
 A completion is answered by walking a configurable provider chain (`llm`): the
 default ships as a single `openai:gpt-4.1-mini` link, and a second, OpenRouter, link
 is opt-in via `LLM_CHAIN` — every provider named there must have its key set, and a
-repeated `provider:model` pair is rejected at boot. Every answered or refused
-question writes a row to `cost_ledger` (`cost`), priced from reported usage or a
-price table when the model is in it, `unknown` otherwise; `GET /costs?from&to`
-aggregates it by provider and model. A question's embedding and a corpus-versioned
+repeated `provider:model` pair is rejected at boot. Every *answered* question
+writes a row to `cost_ledger`, priced from reported usage or a price table when
+the model is in it, `unknown` otherwise; a refusal never calls a model, so it
+writes no ledger row. `GET /costs?from&to` aggregates the ledger by provider and
+model. A question's embedding and a corpus-versioned
 answer are both cached in Redis, so a repeated question costs nothing and answers
 instantly. `/ask`, `/ask/stream` and `/ingest` are rate-limited per client address,
 backed by Redis; every request is logged as one JSON line carrying a request id

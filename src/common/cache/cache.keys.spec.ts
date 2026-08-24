@@ -1,10 +1,18 @@
 import {
   answerKey,
+  answeringConfigFingerprint,
   decodeVector,
   embeddingKey,
   encodeVector,
   normaliseQuestion,
 } from './cache.keys';
+
+const CONFIG = {
+  llmChain: 'openai:gpt-4.1-mini',
+  groundingMaxDistance: 0.5,
+  embeddingModel: 'text-embedding-3-large',
+};
+const FINGERPRINT = answeringConfigFingerprint(CONFIG);
 
 describe('normaliseQuestion', () => {
   it('trims leading and trailing whitespace', () => {
@@ -81,45 +89,105 @@ describe('embeddingKey', () => {
 
 describe('answerKey', () => {
   it('is deterministic for identical inputs', () => {
-    expect(answerKey('v1', 'a question')).toBe(answerKey('v1', 'a question'));
+    expect(answerKey('v1', 'a question', FINGERPRINT)).toBe(
+      answerKey('v1', 'a question', FINGERPRINT),
+    );
   });
 
   // The version is what makes the whole cache invalidate: two answers
   // computed against different corpora must never collide on the same key
   // even when the question is byte-for-byte identical.
   it('differs when the version differs and nothing else does', () => {
-    const a = answerKey('v1', 'a question');
-    const b = answerKey('v2', 'a question');
+    const a = answerKey('v1', 'a question', FINGERPRINT);
+    const b = answerKey('v2', 'a question', FINGERPRINT);
 
     expect(a).not.toBe(b);
   });
 
   it('differs when the question differs', () => {
-    const a = answerKey('v1', 'a question');
-    const b = answerKey('v1', 'another question');
+    const a = answerKey('v1', 'a question', FINGERPRINT);
+    const b = answerKey('v1', 'another question', FINGERPRINT);
+
+    expect(a).not.toBe(b);
+  });
+
+  // The defect this fix closes: changing the answering configuration and
+  // restarting used to leave every prior answer (and refusal) reachable
+  // under its old key for the whole TTL, with the config change appearing
+  // to do nothing.
+  it('differs when the config fingerprint differs and nothing else does', () => {
+    const a = answerKey('v1', 'a question', FINGERPRINT);
+    const b = answerKey(
+      'v1',
+      'a question',
+      answeringConfigFingerprint({ ...CONFIG, groundingMaxDistance: 0.7 }),
+    );
 
     expect(a).not.toBe(b);
   });
 
   it('is the same for a question with surrounding or collapsed whitespace', () => {
-    const a = answerKey('v1', 'a  question');
-    const b = answerKey('v1', '  a question  ');
+    const a = answerKey('v1', 'a  question', FINGERPRINT);
+    const b = answerKey('v1', '  a question  ', FINGERPRINT);
 
     expect(a).toBe(b);
   });
 
   it('preserves case: two questions differing only in case get different keys', () => {
-    const a = answerKey('v1', 'How Do I Use ValidationPipe?');
-    const b = answerKey('v1', 'how do i use validationpipe?');
+    const a = answerKey('v1', 'How Do I Use ValidationPipe?', FINGERPRINT);
+    const b = answerKey('v1', 'how do i use validationpipe?', FINGERPRINT);
 
     expect(a).not.toBe(b);
   });
 
   // The version is carried verbatim, not folded into the hash — an operator
   // reading Redis (SCAN, monitoring) can tell which corpus an entry belongs
-  // to without decoding anything.
+  // to without decoding anything. The config fingerprint, by contrast, is a
+  // hash: unlike the version it has no natural short verbatim form (it is
+  // already a summary of several unrelated values), and nothing needs to
+  // read it back out of the key.
   it('is namespaced under an ans: prefix carrying the version verbatim', () => {
-    expect(answerKey('v1', 'question')).toMatch(/^ans:v1:[0-9a-f]{64}$/);
+    expect(answerKey('v1', 'question', FINGERPRINT)).toMatch(
+      /^ans:v1:[0-9a-f]{64}:[0-9a-f]{64}$/,
+    );
+  });
+});
+
+describe('answeringConfigFingerprint', () => {
+  it('is deterministic for identical inputs', () => {
+    expect(answeringConfigFingerprint(CONFIG)).toBe(
+      answeringConfigFingerprint(CONFIG),
+    );
+  });
+
+  it('differs when the LLM chain differs', () => {
+    const a = answeringConfigFingerprint(CONFIG);
+    const b = answeringConfigFingerprint({
+      ...CONFIG,
+      llmChain: 'openai:gpt-4.1-mini,openrouter:google/gemini-2.5-flash',
+    });
+
+    expect(a).not.toBe(b);
+  });
+
+  it('differs when the grounding threshold differs', () => {
+    const a = answeringConfigFingerprint(CONFIG);
+    const b = answeringConfigFingerprint({
+      ...CONFIG,
+      groundingMaxDistance: 0.61568,
+    });
+
+    expect(a).not.toBe(b);
+  });
+
+  it('differs when the embedding model differs', () => {
+    const a = answeringConfigFingerprint(CONFIG);
+    const b = answeringConfigFingerprint({
+      ...CONFIG,
+      embeddingModel: 'text-embedding-3-small',
+    });
+
+    expect(a).not.toBe(b);
   });
 });
 

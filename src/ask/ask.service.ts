@@ -1,6 +1,9 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
-import { answerKey } from '../common/cache/cache.keys';
+import {
+  answerKey,
+  answeringConfigFingerprint,
+} from '../common/cache/cache.keys';
 import { CacheService } from '../common/cache/cache.service';
 import { CorpusVersion } from '../common/cache/corpus-version';
 import { describeError } from '../common/describe-error';
@@ -21,9 +24,36 @@ import {
 import type { AskResult, CachedAnswer } from './ask.types';
 import { buildPrompt, toCitations } from './prompt';
 
+/** Postgres' error code for a foreign-key violation. */
+const FOREIGN_KEY_VIOLATION_CODE = '23503';
+
+function isForeignKeyViolation(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === FOREIGN_KEY_VIOLATION_CODE
+  );
+}
+
+/**
+ * What `cachedAnswer` reads once, at the start of a request, and every
+ * caller threads through to whichever write follows — `writeCache` via
+ * `recordStreamed`/`recordRefusal`'s own `version` parameter, or `ask`'s
+ * inline write on a miss. Carrying the same value forward rather than
+ * letting the write re-read it is what keeps the read and the write from
+ * ever disagreeing about which corpus the answer belongs to; see
+ * `writeCache`'s own docstring for what disagreeing used to cost.
+ */
+export interface CachedLookup {
+  version: string;
+  cached: CachedAnswer | null;
+}
+
 @Injectable()
 export class AskService {
   private readonly logger = new Logger(AskService.name);
+  private readonly answeringConfigFingerprint: string;
 
   constructor(
     @Inject(RetrievalService) private readonly retrieval: RetrievalService,
@@ -33,7 +63,18 @@ export class AskService {
     @Inject(CacheService) private readonly cache: CacheService,
     @Inject(CorpusVersion) private readonly corpusVersion: CorpusVersion,
     @Inject('CACHE_ANSWER_TTL_S') private readonly answerCacheTtlS: number,
-  ) {}
+    @Inject('LLM_CHAIN') llmChain: string,
+    @Inject('EMBEDDING_MODEL') embeddingModel: string,
+  ) {
+    // Computed once at construction, not per request: every input is a
+    // boot-time configuration value read through DI, none of which changes
+    // for the life of this process.
+    this.answeringConfigFingerprint = answeringConfigFingerprint({
+      llmChain,
+      groundingMaxDistance: maxDistance,
+      embeddingModel,
+    });
+  }
 
   /**
    * Retrieval decides whether an answer is possible, before any token is
@@ -54,7 +95,7 @@ export class AskService {
   }
 
   async ask(question: string): Promise<AskResult> {
-    const cached = await this.cachedAnswer(question);
+    const { version, cached } = await this.cachedAnswer(question);
 
     if (cached) {
       await this.recordCacheHit(question, cached);
@@ -68,7 +109,7 @@ export class AskService {
     const chunks = await this.retrieveGrounded(question);
 
     if (!chunks) {
-      await this.recordRefusal(question);
+      await this.recordRefusal(question, version);
       return { answer: null, grounded: false, citations: [] };
     }
 
@@ -86,7 +127,7 @@ export class AskService {
       cost: this.buildCost(completion),
     });
 
-    await this.writeCache(question, {
+    await this.writeCache(question, version, {
       answer: completion.text,
       grounded: true,
       citations,
@@ -103,16 +144,22 @@ export class AskService {
 
   /**
    * Reads a cached answer for the question as it stands against the corpus
-   * right now. A miss and a hit against a version nothing derives any more
-   * (a stale entry outlived by a corpus change, still sitting under its old
-   * key until its TTL expires) are indistinguishable here by construction —
-   * both simply fail to match the key this call looks up, which is exactly
-   * what makes the corpus version doing the invalidating rather than a
-   * delete sufficient.
+   * right now, and returns the corpus version that lookup was made against
+   * alongside it — the version the caller must reuse for whatever write
+   * follows a miss, rather than asking `corpusVersion` again later. A miss
+   * and a hit against a version nothing derives any more (a stale entry
+   * outlived by a corpus change, still sitting under its old key until its
+   * TTL expires) are indistinguishable here by construction — both simply
+   * fail to match the key this call looks up, which is exactly what makes
+   * the corpus version doing the invalidating rather than a delete
+   * sufficient.
    */
-  async cachedAnswer(question: string): Promise<CachedAnswer | null> {
+  async cachedAnswer(question: string): Promise<CachedLookup> {
     const version = await this.corpusVersion.current();
-    return this.cache.getJson<CachedAnswer>(answerKey(version, question));
+    const cached = await this.cache.getJson<CachedAnswer>(
+      answerKey(version, question, this.answeringConfigFingerprint),
+    );
+    return { version, cached };
   }
 
   /**
@@ -142,12 +189,17 @@ export class AskService {
    * Recording it afterwards keeps a streamed answer in the same tables as a
    * non-streamed one, which is what lets the evaluation suite read both back
    * the same way.
+   *
+   * `version` is the corpus version the controller already read from
+   * `cachedAnswer` before retrieval ran — required, not re-derived here, for
+   * the same reason `ask`'s own write threads it through: see `writeCache`.
    */
   async recordStreamed(
     question: string,
     chunks: RetrievedChunk[],
     text: string,
     outcome: StreamOutcome,
+    version: string,
   ): Promise<void> {
     const citations = toCitations(chunks);
 
@@ -162,7 +214,7 @@ export class AskService {
       cost: this.buildCost(outcome),
     });
 
-    await this.writeCache(question, {
+    await this.writeCache(question, version, {
       answer: text,
       grounded: true,
       citations,
@@ -172,7 +224,13 @@ export class AskService {
     });
   }
 
-  async recordRefusal(question: string): Promise<void> {
+  /**
+   * `version` is the corpus version the caller already read from
+   * `cachedAnswer` — the streaming controller's refusal branch reads it once
+   * before deciding there are no chunks to ground on, and passes the same
+   * value here rather than this method asking again.
+   */
+  async recordRefusal(question: string, version: string): Promise<void> {
     await this.persist({
       question,
       answer: null,
@@ -186,7 +244,7 @@ export class AskService {
     // A refusal is cached too — this is where the biggest saving is, since
     // an uncached refusal still pays for an embedding and the retrieval
     // query before giving up.
-    await this.writeCache(question, {
+    await this.writeCache(question, version, {
       answer: null,
       grounded: false,
       citations: [],
@@ -197,37 +255,33 @@ export class AskService {
   }
 
   /**
-   * The corpus version is looked up again here rather than threaded through
-   * from the read side: it is a cheap aggregate over `sources`, and the
-   * alternative — carrying a version value across an intervening retrieval
-   * and completion call — would let the two calls disagree the moment
-   * anything actually changed, which is a real answer racing the exact event
-   * this cache exists to react to. Recomputing it at write time means the
-   * key an answer is stored under always reflects the corpus at the moment
-   * it was actually produced.
+   * Writes the answer under the corpus version its caller already read at
+   * the top of the request — via `cachedAnswer` — rather than reading it
+   * again here. Re-reading at write time was the original design, and it
+   * was wrong: retrieval and the completion call both take real time, and a
+   * source reaching `ready` during that window made this second read return
+   * a version newer than the one the answer was actually grounded in — a
+   * C1-grounded answer filed under `ans:<C2 version>:...`, the exact key
+   * the *new* corpus computes, served back as though it were a fresh,
+   * correct C2 answer the moment C2 genuinely became current. Threading a
+   * single read through both call sites closes that: the key an answer is
+   * stored under now always reflects the corpus exactly as it stood when
+   * the read at the top of the request happened, which is the corpus
+   * retrieval and the completion actually ran against.
    *
-   * Every caller of this method runs it *after* the answer already exists —
-   * produced, persisted (or the persistence attempt already logged and
-   * swallowed), and on the streaming path already sent to the client. Unlike
-   * `CacheService`, which fails open by design, `corpusVersion.current()` is
-   * a live Postgres query that can reject on a pool timeout or a database
-   * restart. Left unguarded, that would turn a request that already
-   * succeeded into a thrown error the caller has no way to distinguish from
-   * one that never got an answer at all — `/ask` would 503 an answer it just
-   * produced and paid for, and `/ask/stream` would append an `event: error`
-   * after a `done` frame the client already rendered as complete. Losing
-   * this write only means the next identical question pays for another
-   * answer instead of hitting the cache — a lost optimisation, never a
-   * reason to fail a request that already succeeded.
+   * `cache.setJson` is documented to fail open on its own (see
+   * `CacheService`), so this try/catch no longer guards a live database call
+   * the way it used to — but it costs nothing to keep, and does not assume
+   * that contract holds forever.
    */
   private async writeCache(
     question: string,
+    version: string,
     cached: CachedAnswer,
   ): Promise<void> {
     try {
-      const version = await this.corpusVersion.current();
       await this.cache.setJson(
-        answerKey(version, question),
+        answerKey(version, question, this.answeringConfigFingerprint),
         cached,
         this.answerCacheTtlS,
       );
@@ -318,11 +372,43 @@ export class AskService {
   /**
    * Persistence failures are logged, never propagated: by the time this runs
    * the answer has been produced and, on the streaming path, already sent.
+   *
+   * A cached answer can outlive the chunks its citations name: a re-ingest
+   * of the same source (`deleteSourceContent`) deletes and replaces them
+   * while this entry still sits in Redis under its old key, for up to
+   * `CACHE_ANSWER_TTL_S`. `citations.chunk_id` is `NOT NULL REFERENCES
+   * chunks(id)`, so `repository.record`'s single transaction — deliberately
+   * atomic, see its own docstring — rolls back the query, answer and ledger
+   * rows together on that foreign key alone. Left as a plain failure, a
+   * served cache hit would be recorded nowhere at all: no query row, no
+   * answer row, no ledger row, for as long as the entry keeps being served.
+   * `GET /costs` would under-report it and the evaluation suite would never
+   * see it — silently recording nothing is worse than recording an
+   * incomplete row. Retrying once, with the citations that no longer
+   * resolve dropped, keeps the request in the ledger and the query/answer
+   * tables — `grounded` and the answer text are still exactly what was
+   * served, only the specific chunks it once cited are gone, which is
+   * honest: this codebase does not keep the old chunk rows around to
+   * verify them against any more either.
    */
   private async persist(input: RecordInput): Promise<void> {
     try {
       await this.repository.record(input);
     } catch (error: unknown) {
+      if (input.citations.length > 0 && isForeignKeyViolation(error)) {
+        this.logger.warn(
+          `dropping ${input.citations.length} citation(s) referencing chunks that no longer exist (likely a source re-ingested since this answer was cached) and retrying without them: ${describeError(error)}`,
+        );
+        try {
+          await this.repository.record({ ...input, citations: [] });
+        } catch (retryError: unknown) {
+          this.logger.error(
+            `failed to record answer even without citations: ${describeError(retryError)}`,
+          );
+        }
+        return;
+      }
+
       this.logger.error(`failed to record answer: ${describeError(error)}`);
     }
   }

@@ -7,11 +7,13 @@ import { AppModule } from '../src/app.module';
 import { KYSELY } from '../src/common/database/database.module';
 import type { DB } from '../src/common/database/schema';
 import { AskRepository } from '../src/ask/ask.repository';
+import { AskService } from '../src/ask/ask.service';
 
 describe('ask repository', () => {
   let app: INestApplication<Server>;
   let db: Kysely<DB>;
   let repository: AskRepository;
+  let askService: AskService;
   let sourceId: string;
   let chunkId: string;
   // Populated only by tests whose transaction actually commits, so cleanup
@@ -29,6 +31,7 @@ describe('ask repository', () => {
 
     db = app.get<Kysely<DB>>(KYSELY);
     repository = app.get(AskRepository);
+    askService = app.get(AskService);
 
     const source = await db
       .insertInto('sources')
@@ -333,5 +336,71 @@ describe('ask repository', () => {
       .execute();
 
     expect(orphanCosts).toEqual([]);
+  });
+
+  // AskRepository.record() above proves the transaction rolls back
+  // completely on a bad citation — the layer this test targets is one up:
+  // AskService.recordCacheHit, called with a cached answer whose citation
+  // names a chunk that has since been deleted (the real scenario a
+  // re-ingested source produces against an entry still sitting in Redis).
+  // Losing the row entirely — the bare repository behaviour just proven —
+  // would mean a served cache hit is recorded nowhere: no query, no answer,
+  // no ledger row, for as long as that entry keeps being served. This is
+  // the real Postgres FK violation and the real retry, not a mocked
+  // repository standing in for either.
+  it('AskService.recordCacheHit records a cached answer without its stale citation, rather than losing the row entirely', async () => {
+    const question =
+      'a cached answer surviving a citation to a chunk since deleted';
+
+    await db.deleteFrom('queries').where('question', '=', question).execute();
+
+    await expect(
+      askService.recordCacheHit(question, {
+        answer: 'a stale cached answer [1]',
+        grounded: true,
+        citations: [
+          {
+            ordinal: 1,
+            chunkId: '00000000-0000-0000-0000-000000000000',
+            path: 'nowhere.md',
+            headingPath: [],
+            score: 0.1,
+          },
+        ],
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        finishReason: 'stop',
+      }),
+    ).resolves.toBeUndefined();
+
+    const answerRow = await db
+      .selectFrom('answers')
+      .innerJoin('queries', 'queries.id', 'answers.query_id')
+      .select(['answers.id', 'answers.answer', 'answers.query_id'])
+      .where('queries.question', '=', question)
+      .executeTakeFirst();
+
+    expect(answerRow?.answer).toBe('a stale cached answer [1]');
+    if (!answerRow) throw new Error('expected an answer row to exist');
+
+    const citations = await db
+      .selectFrom('citations')
+      .selectAll()
+      .where('answer_id', '=', answerRow.id)
+      .execute();
+    expect(citations).toEqual([]);
+
+    const ledgerRows = await db
+      .selectFrom('cost_ledger')
+      .selectAll()
+      .where('query_id', '=', answerRow.query_id)
+      .execute();
+    expect(ledgerRows).toHaveLength(1);
+    expect(ledgerRows[0]?.cost_source).toBe('cached');
+
+    await db
+      .deleteFrom('queries')
+      .where('id', '=', answerRow.query_id)
+      .execute();
   });
 });

@@ -203,7 +203,46 @@ describe('RedisThrottlerStorage', () => {
 
     expect(record.isBlocked).toBe(false);
     expect(record.totalHits).toBe(0);
-    expect(error).toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining('a bug in the script'),
+    );
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  // The specific defect this fix closes: Redis returns a ReplyError for OOM
+  // too, not only for a bug in this class's own script — and the old
+  // wording told an operator "not an outage" for a condition that plainly
+  // is one, sending them to read code that was never the problem. Asserted
+  // on the message's *content*, not merely that error() was called: a
+  // mutation that swapped this branch's wording for the generic one below
+  // would still fail open exactly the same way and pass every assertion
+  // that only checks isBlocked/totalHits.
+  it('logs the OOM wording, not the script-bug wording, when Redis rejects the command for being out of memory', async () => {
+    const client = fakeRedis();
+    // Redis's actual reply text for this condition, reproduced verbatim —
+    // see redis-throttler.storage.ts's isOutOfMemory comment for where it
+    // was measured.
+    client.throttleIncrement.mockRejectedValue(
+      new ReplyError("OOM command not allowed when used memory > 'maxmemory'."),
+    );
+    const storage = storageWith(client);
+
+    const record = await storage.increment(
+      'client-a',
+      60_000,
+      10,
+      60_000,
+      'default',
+    );
+
+    expect(record.isBlocked).toBe(false);
+    expect(record.totalHits).toBe(0);
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining('out of memory'),
+    );
+    expect(error).toHaveBeenCalledWith(
+      expect.not.stringContaining('a bug in the script'),
+    );
     expect(warn).not.toHaveBeenCalled();
   });
 

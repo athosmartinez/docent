@@ -745,6 +745,94 @@ describe('ask', () => {
     }
   });
 
+  // The specific race AskService's version threading closes:
+  // `cachedAnswer` reads the corpus version, retrieval runs against it, and
+  // only then does the completion call happen — a real window, not a
+  // theoretical one, and long enough for an ingestion to commit inside it.
+  // Before the fix, `writeCache` re-read the version at that later point,
+  // so an answer retrieval had actually produced against the *old* corpus
+  // got filed under the key the *new* one computes — served back as though
+  // it were a fresh, correct answer to the new corpus the moment that
+  // corpus genuinely became current. Reproduced here by having the LLM
+  // stub commit the ingestion from inside the completion call itself — the
+  // real trigger (a source reaching `ready` mid-call), not a delay standing
+  // in for it.
+  it('files the answer under the corpus version it was actually produced against, even when a corpus change lands during the completion call', async () => {
+    const uri = `ask-e2e-race-${randomUUID()}`;
+    let sourceId: string | undefined;
+    let completeCalls = 0;
+    // A plain `let` here would be assigned exactly once too, but the
+    // closure below has to be built — and handed to `overrideProvider` —
+    // before the app (and so `IngestionRepository`) exists at all; a
+    // mutable holder lets that single later assignment happen without
+    // requiring `ingestionRepository` itself to be reassignable.
+    const refs: { ingestionRepository?: IngestionRepository } = {};
+
+    // No CorpusVersion override: the race lives in the real class's own
+    // timing (a version read before retrieval, a corpus mutation landing
+    // before the write that follows) — a fake version's fixed timeline
+    // cannot stand in for that.
+    const racingLlm: LlmProvider = {
+      complete: async (request: CompletionRequest) => {
+        completeCalls += 1;
+        // The ingestion fires only once, on the first completion call — the
+        // second request in this test is expected to be a fresh miss on
+        // its own right (a genuinely different, later corpus version), not
+        // because a second ingestion happened underneath it too. The same
+        // two repository calls a completed ingestion run itself makes,
+        // fired from inside the completion call — after retrieval has
+        // already run against the corpus as it stood before this request
+        // started.
+        if (!sourceId) {
+          const ingestionRepository = refs.ingestionRepository;
+          if (!ingestionRepository) throw new Error('app not ready yet');
+          sourceId = await ingestionRepository.createSource(uri, 'docs');
+          await ingestionRepository.markReady(sourceId);
+        }
+        return stubLlm.complete(request);
+      },
+      stream: (request: CompletionRequest) => stubLlm.stream(request),
+    };
+
+    const racing = await askTestingModule()
+      .overrideProvider(LLM)
+      .useValue(racingLlm)
+      .compile();
+
+    const racingApp = racing.createNestApplication<INestApplication<Server>>();
+    await listenOnEphemeralPort(racingApp);
+    refs.ingestionRepository = racingApp.get(IngestionRepository);
+
+    const question = `what does unmistakablemarker do, version race test ${randomUUID()}?`;
+
+    try {
+      await request(racingApp.getHttpServer())
+        .post('/ask')
+        .send({ question })
+        .expect(200);
+
+      expect(completeCalls).toBe(1);
+      expect(sourceId).toBeDefined();
+
+      // A second identical request now reads the *new*, post-ingestion
+      // corpus version — the one the pre-fix race would have filed the
+      // first answer's cache entry under. Filed correctly, under the
+      // version retrieval actually ran against, this has to be a fresh
+      // miss rather than a hit against the wrongly-filed entry.
+      await request(racingApp.getHttpServer())
+        .post('/ask')
+        .send({ question })
+        .expect(200);
+
+      expect(completeCalls).toBe(2);
+    } finally {
+      if (sourceId) {
+        await db.deleteFrom('sources').where('id', '=', sourceId).execute();
+      }
+      await racingApp.close();
+    }
+  });
+
   it('a question cached via /ask is also served from cache via /ask/stream, and vice versa', async () => {
     let completeCalls = 0;
     let streamCalls = 0;

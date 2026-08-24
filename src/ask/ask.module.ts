@@ -25,6 +25,16 @@ import { AskService } from './ask.service';
       useFactory: (config: ConfigService<Env, true>): number =>
         config.get('CACHE_ANSWER_TTL_S', { infer: true }),
     },
+    // Folded into the answer cache key (see cache.keys.ts's
+    // answeringConfigFingerprint) rather than read only by LlmModule's own
+    // factory — the chain determines which model answers, so it is part of
+    // what an entry is even an answer to.
+    {
+      provide: 'LLM_CHAIN',
+      inject: [ConfigService],
+      useFactory: (config: ConfigService<Env, true>): string =>
+        config.get('LLM_CHAIN', { infer: true }),
+    },
   ],
   exports: [AskRepository, AskService],
 })
