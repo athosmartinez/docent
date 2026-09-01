@@ -40,6 +40,11 @@ jobs:
       # A placeholder, not a secret: config validation requires the variable to be
       # a non-empty string, and no test in this suite calls the OpenAI API.
       OPENAI_API_KEY: not-a-real-key
+      # A placeholder, like the OpenAI one above: no test calls a provider,
+      # and the suites that exercise the fallback build a two-link chain
+      # pointing at a dead base URL. Config validation only requires the
+      # variable to be a non-empty string.
+      OPENROUTER_API_KEY: not-a-real-key
 
     steps:
       - uses: actions/checkout@v4

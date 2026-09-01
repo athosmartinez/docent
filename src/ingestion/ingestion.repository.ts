@@ -21,6 +21,22 @@ export interface ChunkInput {
   metadata: Record<string, unknown>;
 }
 
+/**
+ * Every write to `sources.updated_at` below uses Postgres's own clock
+ * (`sql\`now()\``), never `new Date()` from the application. CorpusVersion's
+ * soundness rests on one thing: a newly-`ready` source's timestamp exceeds
+ * every other `ready` source's. That holds under one monotonic clock; it
+ * does not hold under two. With an application clock and a database clock
+ * disagreeing — ordinary skew, or a backwards NTP step on the host running
+ * ingestion — a source can be fully re-ingested, its old chunks deleted, new
+ * ones committed, `markReady` run, and still not become the corpus's newest
+ * `ready` row, so the version never moves and the answer cache keeps
+ * serving every answer grounded in the old chunks until its TTL expires,
+ * with no error and no symptom. A single clock closes that trigger for a
+ * single-database deployment; it does not make the mechanism airtight in
+ * general (concurrent ingestion runs can still commit out of start order),
+ * which is what CACHE_ANSWER_TTL_S ultimately bounds.
+ */
 @Injectable()
 export class IngestionRepository {
   constructor(@Inject(KYSELY) private readonly db: Kysely<DB>) {}
@@ -76,7 +92,7 @@ export class IngestionRepository {
         .execute();
       await trx
         .updateTable('sources')
-        .set({ document_count: 0, chunk_count: 0, updated_at: new Date() })
+        .set({ document_count: 0, chunk_count: 0, updated_at: sql`now()` })
         .where('id', '=', sourceId)
         .execute();
     });
@@ -89,10 +105,31 @@ export class IngestionRepository {
         status: 'processing',
         commit_sha: commitSha,
         error: null,
-        updated_at: new Date(),
+        updated_at: sql`now()`,
       })
       .where('id', '=', id)
       .execute();
+  }
+
+  /**
+   * Postgres's own `now()`. `claimForProcessing` below already stamps the
+   * row it claims with the database's `now()`, never the application's — a
+   * caller computing a staleness threshold (`now() - leaseMs`) needs that
+   * same clock, or it ends up comparing a lease renewed moments ago by one
+   * clock against a threshold computed from a different, disagreeing one,
+   * which can make a genuinely live run look expired.
+   */
+  async databaseNow(): Promise<Date> {
+    const result = await sql<{ now: Date }>`SELECT now() AS now`.execute(
+      this.db,
+    );
+    const row = result.rows[0];
+
+    if (!row) {
+      throw new Error('SELECT now() returned no rows');
+    }
+
+    return row.now;
   }
 
   /**
@@ -132,7 +169,7 @@ export class IngestionRepository {
   async touchProcessing(id: string): Promise<void> {
     await this.db
       .updateTable('sources')
-      .set({ updated_at: new Date() })
+      .set({ updated_at: sql`now()` })
       .where('id', '=', id)
       .where('status', '=', 'processing')
       .execute();
@@ -141,7 +178,7 @@ export class IngestionRepository {
   async markReady(id: string): Promise<void> {
     await this.db
       .updateTable('sources')
-      .set({ status: 'ready', updated_at: new Date() })
+      .set({ status: 'ready', updated_at: sql`now()` })
       .where('id', '=', id)
       .execute();
   }
@@ -149,7 +186,7 @@ export class IngestionRepository {
   async markFailed(id: string, error: string): Promise<void> {
     await this.db
       .updateTable('sources')
-      .set({ status: 'failed', error, updated_at: new Date() })
+      .set({ status: 'failed', error, updated_at: sql`now()` })
       .where('id', '=', id)
       .execute();
   }
@@ -157,7 +194,7 @@ export class IngestionRepository {
   async recordSkipped(id: string, skipped: number): Promise<void> {
     await this.db
       .updateTable('sources')
-      .set({ metadata: { skipped_documents: skipped }, updated_at: new Date() })
+      .set({ metadata: { skipped_documents: skipped }, updated_at: sql`now()` })
       .where('id', '=', id)
       .execute();
   }
@@ -205,7 +242,7 @@ export class IngestionRepository {
         .set({
           document_count: sql`document_count + 1`,
           chunk_count: sql`chunk_count + ${chunks.length}`,
-          updated_at: new Date(),
+          updated_at: sql`now()`,
         })
         .where('id', '=', sourceId)
         .execute();

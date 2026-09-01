@@ -21,6 +21,43 @@ services:
       - '${REDIS_PORT:-6379}:6379'
     volumes:
       - redis-data:/data
+    # No `maxmemory` at all is Redis's own default — unbounded, growing
+    # until the host's memory does, which just moves the failure from Redis
+    # to the OS. A bounded `maxmemory` with the default `noeviction` policy
+    # is worse than that: once full, every write (SET, EVAL, ...) is
+    # refused with an OOM reply instead of the key store making room, and
+    # that reply reaches this app as a plain ReplyError indistinguishable
+    # from a bug in our own Lua script — which is exactly what let a full
+    # Redis silently disable the rate limiter behind a still-green
+    # `GET /health` (`RedisThrottlerStorage.increment`'s fail-open `catch`
+    # cannot tell "Redis rejected a malformed command" from "Redis is full"
+    # without checking the reply text itself).
+    #
+    # `allkeys-lru` instead: every key this service ever writes here already
+    # carries a TTL (CacheService.setJson always passes EX; the throttle
+    # script PEXPIREs its own counter) and is safe to lose — a cache miss
+    # recomputes, a lost throttle counter just restarts that one client's
+    # count at zero. Eviction never destroys anything that was not already
+    # going to expire on its own. `volatile-lru` (LRU restricted to keys
+    # that carry a TTL) would behave identically today, since nothing here
+    # is ever written without one — `allkeys-lru` is the safer choice
+    # anyway: it guarantees a full Redis always makes room, even if a future
+    # change ever added a key with no expiry by mistake, rather than
+    # reintroducing this exact OOM-refuses-writes failure for that one key.
+    # `volatile-ttl` (evict the key closest to expiring) was rejected
+    # specifically because it would preferentially evict the throttle
+    # counters — their windows are the shortest-lived thing in this store —
+    # ahead of days-old cache entries, weakening rate limiting first under
+    # memory pressure instead of last. `maxmemory` itself is a modest local
+    # default sized for this compose file's own dev/CI use, not a
+    # production sizing recommendation.
+    #
+    # This is local/CI infrastructure only. A production Redis, or any
+    # Redis this service does not start itself, needs its operator to set
+    # an equivalent `maxmemory`/`maxmemory-policy` independently — this
+    # repository has no way to configure a server it does not launch. See
+    # the Getting Started section of README.md.
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 5s

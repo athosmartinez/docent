@@ -156,9 +156,19 @@ export class IngestionService {
    * write: two callers racing this method for the same source cannot both
    * win, because the claim's WHERE clause is re-evaluated against
    * whichever one committed first.
+   *
+   * The staleness threshold is computed from `repository.databaseNow()`,
+   * not `Date.now()`: `updated_at` is always written with Postgres's own
+   * clock (every write in `IngestionRepository` does), so a threshold
+   * computed from a different, disagreeing clock would compare the two
+   * across a skew that has nothing to do with how long the lease has
+   * actually gone unrenewed — on a sufficiently skewed host, letting a
+   * live run's lease look expired to a competing claim and get reclaimed
+   * out from under it.
    */
   private async reuse(source: SourceRow, uri: string): Promise<string> {
-    const staleBefore = new Date(Date.now() - this.lease.leaseMs);
+    const now = await this.repository.databaseNow();
+    const staleBefore = new Date(now.getTime() - this.lease.leaseMs);
 
     // Computed from the pre-claim snapshot, purely to decide whether to log
     // below — the claim itself is what actually enforces the rule.

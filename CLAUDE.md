@@ -6,14 +6,27 @@ Guidance for AI agents (and humans) working in this repository.
 
 `docent` is an **agentic RAG service** over docs/codebases, in **TypeScript / Nest.js**, with multi-provider LLM routing + fallback, cost tracking, an evaluation suite, and a native **MCP** server. See `README.md` for the public overview.
 
-## Current status — M2 complete
+## Current status — M3 complete
 
-The service ingests a documentation repository into embedded, indexed chunks and now
+The service ingests a documentation repository into embedded, indexed chunks and
 answers questions about it with inline citations: `POST /ask` and `POST /ask/stream`
 (SSE) both drive `retrieval`, which queries the vector index and `content_tsv` and
 fuses the two rankings by Reciprocal Rank Fusion. A question with no chunk close
 enough to it is refused before the LLM is ever called. A minimal chat page at `/`
-drives both endpoints. **Next milestone: M3** (production engine) — see
+drives both endpoints.
+
+A completion is answered by walking a configurable provider chain (`llm`): the
+default ships as a single `openai:gpt-4.1-mini` link, and a second, OpenRouter, link
+is opt-in via `LLM_CHAIN` — every provider named there must have its key set, and a
+repeated `provider:model` pair is rejected at boot. Every *answered* question
+writes a row to `cost_ledger`, priced from reported usage or a price table when
+the model is in it, `unknown` otherwise; a refusal never calls a model, so it
+writes no ledger row. `GET /costs?from&to` aggregates the ledger by provider and
+model. A question's embedding and a corpus-versioned
+answer are both cached in Redis, so a repeated question costs nothing and answers
+instantly. `/ask`, `/ask/stream` and `/ingest` are rate-limited per client address,
+backed by Redis; every request is logged as one JSON line carrying a request id
+that the response echoes back. **Next milestone: M4** (agentic layer) — see
 `_planning/03-roadmap.md`.
 
 ## The plan lives in `_planning/` (read it first)
@@ -42,20 +55,21 @@ the flags that will bite you first on the wrong runtime.
 ## Tech stack & structure
 
 - **Node.js · TypeScript (strict) · Nest.js**
-- **PostgreSQL + pgvector** (vectors) · **Redis** (cache)
+- **PostgreSQL + pgvector** (vectors) · **Redis** (cache, rate limiting)
 - LLM access via OpenAI-compatible SDKs + OpenRouter · MCP via `@modelcontextprotocol/sdk`
 - Eval via promptfoo + LLM-as-judge
 
-Modules under `src/` today: **`common`** (config, database, redis, shared helpers),
-**`health`**, **`ingestion`** (source fetching, markdown cleaning, HTML-table
-conversion, chunking, and the repository that writes documents/chunks),
-**`embeddings`** (the OpenAI embeddings provider),
-**`retrieval`** (the vector + lexical queries and their RRF fusion),
-**`llm`** (the completion provider used to answer a question) and **`ask`** (grounding,
-prompt assembly, citation numbering, persistence, and the REST/SSE controller plus the
-chat page). The rest — `agent · cost · mcp · eval · api` — are the target structure
-from `_planning/02-architecture.md`; each is created by the milestone that gives it
-content, not before.
+Modules under `src/` today: **`common`** (config, database, redis, cache, structured
+logging, rate limiting, shared helpers), **`health`**, **`ingestion`** (source
+fetching, markdown cleaning, HTML-table conversion, chunking, and the repository that
+writes documents/chunks), **`embeddings`** (the OpenAI embeddings provider),
+**`retrieval`** (the vector + lexical queries and their RRF fusion), **`llm`** (the
+provider chain and the router that walks it with fallback), **`cost`** (pricing a
+completion from its usage, the ledger, and `GET /costs`) and **`ask`** (grounding,
+prompt assembly, citation numbering, persistence, caching, and the REST/SSE
+controller plus the chat page). The rest — `agent · mcp · eval · api` — are the
+target structure from `_planning/02-architecture.md`; each is created by the
+milestone that gives it content, not before.
 
 ## Commands
 
@@ -221,6 +235,61 @@ anything that talks to the network or to the database.
   sorted the way the code sorts it, an empty stream chunk placed last where the real
   API sends it first, an existence check that any leftover row satisfied. Each was
   found by mutation and none by reading.
+- **The chain separator is the first colon only** (`parseLlmChain`,
+  `src/llm/llm-chain.ts`). An OpenRouter model name can carry a further colon as a
+  variant suffix (`google/gemini-2.5-flash:free`); splitting on every colon would
+  route to a different model than the one configured.
+- **A link failure falls through on every error, including 401.** `LlmRouter`
+  (`src/llm/llm.router.ts`) never inspects a failure's status code before moving to
+  the next link — the next link is a different provider with a different key, so a
+  401 that is fatal for this one says nothing about the next one's chance of
+  succeeding. Refusing to repeat a `provider:model` pair, enforced once in
+  `parseLlmChain`, is what keeps this from retrying the same doomed call forever.
+- **A stream link is not chosen until its first delta arrives, and that delta is
+  re-yielded rather than dropped.** A provider failure very often surfaces on the
+  first iteration rather than on the call that opens the stream, so `LlmRouter.stream()`
+  pulls one delta before trusting a link good; having already produced real content,
+  that delta goes to the caller too, not just the ones that follow it.
+- **`prompt_tokens` already contains `cached_tokens`.** `normaliseUsage`
+  (`src/llm/openai-compatible.provider.ts`) keeps both numbers as reported rather than
+  subtracting one from the other; `computeCost` (`src/cost/cost.calculator.ts`) is the
+  one place that derives the uncached remainder, so an input rate is never applied to
+  the same tokens twice.
+- **`pg` returns `numeric` as a string, like `vector`.** A `numeric` can exceed what a
+  JS `double` holds without loss, so `cost_ledger.usd_cost`'s `NumericColumn`
+  (`src/common/database/schema.ts`) declares the string form explicitly — adding two
+  unparsed numeric strings in JavaScript concatenates them instead of summing,
+  silently.
+- **The answer cache's version is derived from Postgres, never held as a Redis
+  counter.** `CorpusVersion.current()` (`src/common/cache/corpus-version.ts`)
+  computes `count(*)` plus `max(updated_at)` over `ready` sources on every read. A
+  counter in Redis is lost to a flush or an eviction, and one that resets to its
+  initial value makes every superseded answer reachable again — stale content served
+  as fresh, with no symptom anywhere.
+- **The cache fails open, because Redis is an optimisation, not a dependency.**
+  Every `CacheService` read and write (`src/common/cache/cache.service.ts`) swallows
+  and logs rather than propagating — a cache miss and an unreachable cache look
+  identical to every caller, both meaning "compute it yourself." The rate limiter
+  (`src/common/throttling/redis-throttler.storage.ts`) fails open for the same reason
+  but not the same way: it bounds the wait with `withTimeout` first, because ordinary
+  latency on a reachable Redis should not read as "no limit" either.
+- **Pricing is keyed by `configuredModel`, never by the `model` a response reports.**
+  `OpenAiCompatibleProvider` sets both on every `CompletionResult`/`StreamOutcome`:
+  `model` is what actually served the request, exactly as the provider's own response
+  names it; `configuredModel` is what the chain link was built with. OpenAI silently
+  resolves a requested alias (`gpt-4.1-mini`) to the dated snapshot that serves it
+  (`gpt-4.1-mini-2025-04-14`) and reports the snapshot on both the completion and every
+  streamed chunk — a string `MODEL_PRICES` was never keyed on and has no stable way to
+  be, since it changes without notice. `computeCost` (`src/cost/cost.calculator.ts`)
+  only ever receives `configuredModel`, so there is no served-model string in scope for
+  a future change to reach for by mistake. `model` still goes to the ledger's own
+  `model` column unmodified — a provider quietly serving a more specific model than
+  requested is worth recording, not normalising away; only the *price lookup* needed
+  the split. This bit twice independently, once per transport (`complete()` from
+  `response.model`, `stream()` — before this fix — from the closed-over configured
+  value regardless of what any chunk reported), so the two transports priced an
+  identically-served completion differently until both were pinned to read
+  `configuredModel` the same way.
 
 ## Security
 

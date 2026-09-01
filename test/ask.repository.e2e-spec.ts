@@ -7,11 +7,13 @@ import { AppModule } from '../src/app.module';
 import { KYSELY } from '../src/common/database/database.module';
 import type { DB } from '../src/common/database/schema';
 import { AskRepository } from '../src/ask/ask.repository';
+import { AskService } from '../src/ask/ask.service';
 
 describe('ask repository', () => {
   let app: INestApplication<Server>;
   let db: Kysely<DB>;
   let repository: AskRepository;
+  let askService: AskService;
   let sourceId: string;
   let chunkId: string;
   // Populated only by tests whose transaction actually commits, so cleanup
@@ -29,6 +31,7 @@ describe('ask repository', () => {
 
     db = app.get<Kysely<DB>>(KYSELY);
     repository = app.get(AskRepository);
+    askService = app.get(AskService);
 
     const source = await db
       .insertInto('sources')
@@ -118,6 +121,75 @@ describe('ask repository', () => {
     expect(answer.finish_reason).toBe('stop');
   });
 
+  it('writes exactly one cost_ledger row, joined to the created query, with usd_cost parsed back as a number', async () => {
+    const answerId = await repository.record({
+      question: 'a costed question',
+      answer: 'an answer [1]',
+      grounded: true,
+      model: 'gpt-4.1-mini',
+      provider: 'openai',
+      finishReason: 'stop',
+      citations: [],
+      cost: {
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        promptTokens: 100,
+        completionTokens: 50,
+        cachedTokens: 10,
+        usdCost: 0.00123456,
+        costSource: 'table',
+        modelReason: 'primary',
+      },
+    });
+
+    createdAnswerIds.push(answerId);
+
+    const rows = await db
+      .selectFrom('cost_ledger')
+      .innerJoin('answers', 'answers.query_id', 'cost_ledger.query_id')
+      .selectAll('cost_ledger')
+      .where('answers.id', '=', answerId)
+      .execute();
+
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    if (!row) throw new Error('expected a cost_ledger row');
+
+    expect(row.provider).toBe('openai');
+    expect(row.model).toBe('gpt-4.1-mini');
+    expect(row.prompt_tokens).toBe(100);
+    expect(row.completion_tokens).toBe(50);
+    expect(row.cached_tokens).toBe(10);
+    expect(row.cost_source).toBe('table');
+    expect(row.model_reason).toBe('primary');
+    // usd_cost comes back as the numeric column's string wire form; parsing
+    // it is what proves the value round-trips rather than merely existing.
+    expect(Number(row.usd_cost)).toBeCloseTo(0.00123456, 8);
+  });
+
+  it('writes no cost_ledger row for a refusal', async () => {
+    const answerId = await repository.record({
+      question: 'a refusal carries no cost to record',
+      answer: null,
+      grounded: false,
+      model: null,
+      provider: null,
+      finishReason: null,
+      citations: [],
+    });
+
+    createdAnswerIds.push(answerId);
+
+    const rows = await db
+      .selectFrom('cost_ledger')
+      .innerJoin('answers', 'answers.query_id', 'cost_ledger.query_id')
+      .selectAll('cost_ledger')
+      .where('answers.id', '=', answerId)
+      .execute();
+
+    expect(rows).toEqual([]);
+  });
+
   it('records a refusal with no citations and a null answer', async () => {
     const answerId = await repository.record({
       question: 'something out of corpus',
@@ -141,9 +213,9 @@ describe('ask repository', () => {
     expect(answer.answer).toBeNull();
   });
 
-  it('writes query and answer in one transaction', async () => {
+  it('writes query, answer and cost in one transaction', async () => {
     // A citation pointing at a chunk that does not exist violates the foreign
-    // key, and must leave no orphan query behind.
+    // key, and must leave no orphan query, answer, or ledger row behind.
     //
     // The check is on rows carrying this question, never on a count of the
     // whole table: the e2e runner uses Jest's default parallelism across spec
@@ -153,8 +225,15 @@ describe('ask repository', () => {
 
     // Any row left by an earlier run of this test would itself be the defect
     // under test, so clearing first keeps a single past failure from pinning
-    // this red forever.
+    // this red forever. The query row is the join key cost_ledger is
+    // normally read back through, but a rolled-back insert never produces
+    // one to join against — modelReason doubles as the scoped marker for the
+    // ledger side of this same check.
     await db.deleteFrom('queries').where('question', '=', question).execute();
+    await db
+      .deleteFrom('cost_ledger')
+      .where('model_reason', '=', question)
+      .execute();
 
     await expect(
       repository.record({
@@ -173,15 +252,155 @@ describe('ask repository', () => {
             score: 0.1,
           },
         ],
+        cost: {
+          provider: 'openai',
+          model: 'm',
+          promptTokens: 1,
+          completionTokens: 1,
+          cachedTokens: 0,
+          usdCost: 0.01,
+          costSource: 'table',
+          modelReason: question,
+        },
       }),
     ).rejects.toThrow();
 
-    const orphans = await db
+    const orphanQueries = await db
       .selectFrom('queries')
       .select('id')
       .where('question', '=', question)
       .execute();
 
-    expect(orphans).toEqual([]);
+    expect(orphanQueries).toEqual([]);
+
+    const orphanCosts = await db
+      .selectFrom('cost_ledger')
+      .select('id')
+      .where('model_reason', '=', question)
+      .execute();
+
+    expect(orphanCosts).toEqual([]);
+  });
+
+  it('rolls back the query and answer when the ledger insert itself fails', async () => {
+    // The citation-FK test above fails upstream of the ledger insert, so it
+    // cannot tell atomicity apart from insert order — a ledger write moved
+    // after the transaction commits would still pass it. usd_cost is
+    // numeric(14,8): 6 integer digits at most, so a value with more raises
+    // "numeric field overflow" from inside the ledger insert statement
+    // itself, proving the query and answer it was written alongside are
+    // gone because the transaction rolled back, not because some earlier
+    // step never ran.
+    const question = 'ledger insert overflow, not a step that runs before it';
+
+    await db.deleteFrom('queries').where('question', '=', question).execute();
+    await db
+      .deleteFrom('cost_ledger')
+      .where('model_reason', '=', question)
+      .execute();
+
+    await expect(
+      repository.record({
+        question,
+        answer: 'x',
+        grounded: true,
+        model: 'm',
+        provider: 'openai',
+        finishReason: 'stop',
+        citations: [],
+        cost: {
+          provider: 'openai',
+          model: 'm',
+          promptTokens: 1,
+          completionTokens: 1,
+          cachedTokens: 0,
+          usdCost: 100_000_000,
+          costSource: 'table',
+          modelReason: question,
+        },
+      }),
+    ).rejects.toThrow();
+
+    const orphanQueries = await db
+      .selectFrom('queries')
+      .select('id')
+      .where('question', '=', question)
+      .execute();
+
+    expect(orphanQueries).toEqual([]);
+
+    const orphanCosts = await db
+      .selectFrom('cost_ledger')
+      .select('id')
+      .where('model_reason', '=', question)
+      .execute();
+
+    expect(orphanCosts).toEqual([]);
+  });
+
+  // AskRepository.record() above proves the transaction rolls back
+  // completely on a bad citation — the layer this test targets is one up:
+  // AskService.recordCacheHit, called with a cached answer whose citation
+  // names a chunk that has since been deleted (the real scenario a
+  // re-ingested source produces against an entry still sitting in Redis).
+  // Losing the row entirely — the bare repository behaviour just proven —
+  // would mean a served cache hit is recorded nowhere: no query, no answer,
+  // no ledger row, for as long as that entry keeps being served. This is
+  // the real Postgres FK violation and the real retry, not a mocked
+  // repository standing in for either.
+  it('AskService.recordCacheHit records a cached answer without its stale citation, rather than losing the row entirely', async () => {
+    const question =
+      'a cached answer surviving a citation to a chunk since deleted';
+
+    await db.deleteFrom('queries').where('question', '=', question).execute();
+
+    await expect(
+      askService.recordCacheHit(question, {
+        answer: 'a stale cached answer [1]',
+        grounded: true,
+        citations: [
+          {
+            ordinal: 1,
+            chunkId: '00000000-0000-0000-0000-000000000000',
+            path: 'nowhere.md',
+            headingPath: [],
+            score: 0.1,
+          },
+        ],
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        finishReason: 'stop',
+      }),
+    ).resolves.toBeUndefined();
+
+    const answerRow = await db
+      .selectFrom('answers')
+      .innerJoin('queries', 'queries.id', 'answers.query_id')
+      .select(['answers.id', 'answers.answer', 'answers.query_id'])
+      .where('queries.question', '=', question)
+      .executeTakeFirst();
+
+    expect(answerRow?.answer).toBe('a stale cached answer [1]');
+    if (!answerRow) throw new Error('expected an answer row to exist');
+
+    const citations = await db
+      .selectFrom('citations')
+      .selectAll()
+      .where('answer_id', '=', answerRow.id)
+      .execute();
+    expect(citations).toEqual([]);
+
+    const ledgerRows = await db
+      .selectFrom('cost_ledger')
+      .selectAll()
+      .where('query_id', '=', answerRow.query_id)
+      .execute();
+    expect(ledgerRows).toHaveLength(1);
+    expect(ledgerRows[0]?.cost_source).toBe('cached');
+
+    await db
+      .deleteFrom('queries')
+      .where('id', '=', answerRow.query_id)
+      .execute();
   });
 });

@@ -89,4 +89,204 @@ describe('validateEnv', () => {
 
     expect(env.GROUNDING_MAX_DISTANCE).toBe(1.9999);
   });
+
+  it('defaults CACHE_EMBEDDING_TTL_S to thirty days', () => {
+    const env = validateEnv({ ...valid });
+
+    expect(env.CACHE_EMBEDDING_TTL_S).toBe(2_592_000);
+  });
+
+  it('coerces CACHE_EMBEDDING_TTL_S from its string form', () => {
+    const env = validateEnv({ ...valid, CACHE_EMBEDDING_TTL_S: '60' });
+
+    expect(env.CACHE_EMBEDDING_TTL_S).toBe(60);
+  });
+
+  it('rejects a non-positive CACHE_EMBEDDING_TTL_S', () => {
+    expect(() => validateEnv({ ...valid, CACHE_EMBEDDING_TTL_S: '0' })).toThrow(
+      /CACHE_EMBEDDING_TTL_S/,
+    );
+  });
+
+  // The bound is load-bearing, not decorative: THROTTLE_ASK_PER_MINUTE=0
+  // makes every request to /ask fail (totalHits, at minimum 1, is always
+  // > 0), and a negative or fractional limit is nonsensical for the same
+  // comparison. Each of the three keys is checked independently — a fix
+  // applied to one by copy-paste, forgotten on the others, still fails
+  // here.
+  it.each([
+    'THROTTLE_DEFAULT_PER_MINUTE',
+    'THROTTLE_ASK_PER_MINUTE',
+    'THROTTLE_INGEST_PER_MINUTE',
+    'THROTTLE_HEALTH_PER_MINUTE',
+  ])('rejects a zero %s', (key) => {
+    expect(() => validateEnv({ ...valid, [key]: '0' })).toThrow(
+      new RegExp(key),
+    );
+  });
+
+  it.each([
+    'THROTTLE_DEFAULT_PER_MINUTE',
+    'THROTTLE_ASK_PER_MINUTE',
+    'THROTTLE_INGEST_PER_MINUTE',
+    'THROTTLE_HEALTH_PER_MINUTE',
+  ])('rejects a negative %s', (key) => {
+    expect(() => validateEnv({ ...valid, [key]: '-1' })).toThrow(
+      new RegExp(key),
+    );
+  });
+
+  it.each([
+    'THROTTLE_DEFAULT_PER_MINUTE',
+    'THROTTLE_ASK_PER_MINUTE',
+    'THROTTLE_INGEST_PER_MINUTE',
+    'THROTTLE_HEALTH_PER_MINUTE',
+  ])('rejects a non-integer %s', (key) => {
+    expect(() => validateEnv({ ...valid, [key]: '1.5' })).toThrow(
+      new RegExp(key),
+    );
+  });
+
+  it('defaults the four rate limits to 60/10/2/300 per minute', () => {
+    const env = validateEnv({ ...valid });
+
+    expect(env.THROTTLE_DEFAULT_PER_MINUTE).toBe(60);
+    expect(env.THROTTLE_ASK_PER_MINUTE).toBe(10);
+    expect(env.THROTTLE_INGEST_PER_MINUTE).toBe(2);
+    expect(env.THROTTLE_HEALTH_PER_MINUTE).toBe(300);
+  });
+
+  describe('TRUST_PROXY', () => {
+    it('defaults to false', () => {
+      const env = validateEnv({ ...valid });
+
+      expect(env.TRUST_PROXY).toBe(false);
+    });
+
+    it('parses "false" as the boolean false', () => {
+      const env = validateEnv({ ...valid, TRUST_PROXY: 'false' });
+
+      expect(env.TRUST_PROXY).toBe(false);
+    });
+
+    // The literal `true` is the one value that makes the limiter fully
+    // evadable (see parseTrustProxy's own comment) — every deployment
+    // shape below is what boot should accept instead.
+    it('rejects the literal true, naming why', () => {
+      expect(() => validateEnv({ ...valid, TRUST_PROXY: 'true' })).toThrow(
+        /left-most/,
+      );
+    });
+
+    it('parses a hop count as a number', () => {
+      const env = validateEnv({ ...valid, TRUST_PROXY: '1' });
+
+      expect(env.TRUST_PROXY).toBe(1);
+    });
+
+    it.each(['loopback', 'linklocal', 'uniquelocal'])(
+      'parses the %s preset as itself',
+      (preset) => {
+        const env = validateEnv({ ...valid, TRUST_PROXY: preset });
+
+        expect(env.TRUST_PROXY).toBe(preset);
+      },
+    );
+
+    it('parses a comma-separated list of addresses/CIDRs as itself', () => {
+      const env = validateEnv({
+        ...valid,
+        TRUST_PROXY: '10.0.0.1, 172.16.0.0/12',
+      });
+
+      expect(env.TRUST_PROXY).toBe('10.0.0.1, 172.16.0.0/12');
+    });
+
+    it('rejects a list with an empty entry', () => {
+      expect(() =>
+        validateEnv({ ...valid, TRUST_PROXY: '10.0.0.1,,172.16.0.0/12' }),
+      ).toThrow(/TRUST_PROXY/);
+    });
+  });
+
+  describe('LOG_FORMAT', () => {
+    // Both branches of the same NODE_ENV-conditioned default, in one test:
+    // a mutation that hardcodes either literal (always 'pretty', always
+    // 'json') passes whichever assertion matches its constant and fails the
+    // other — testing only one environment would leave that mutation
+    // undetected.
+    it('defaults to pretty in development and json everywhere else', () => {
+      expect(
+        validateEnv({ ...valid, NODE_ENV: 'development' }).LOG_FORMAT,
+      ).toBe('pretty');
+      expect(validateEnv({ ...valid, NODE_ENV: 'production' }).LOG_FORMAT).toBe(
+        'json',
+      );
+      expect(validateEnv({ ...valid, NODE_ENV: 'test' }).LOG_FORMAT).toBe(
+        'json',
+      );
+    });
+
+    // An explicit value always wins over the NODE_ENV-derived default, in
+    // both directions — proving the override is read before the default is
+    // computed, not applied on top of it or ignored.
+    it('an explicit LOG_FORMAT overrides the NODE_ENV default in either direction', () => {
+      expect(
+        validateEnv({ ...valid, NODE_ENV: 'development', LOG_FORMAT: 'json' })
+          .LOG_FORMAT,
+      ).toBe('json');
+      expect(
+        validateEnv({ ...valid, NODE_ENV: 'production', LOG_FORMAT: 'pretty' })
+          .LOG_FORMAT,
+      ).toBe('pretty');
+    });
+
+    it('rejects a value that is neither json nor pretty', () => {
+      expect(() => validateEnv({ ...valid, LOG_FORMAT: 'yaml' })).toThrow(
+        /LOG_FORMAT/,
+      );
+    });
+  });
+});
+
+const base = {
+  DATABASE_URL: 'postgresql://u:p@localhost:5432/d',
+  REDIS_URL: 'redis://localhost:6379',
+  OPENAI_API_KEY: 'sk-test',
+};
+
+describe('validateEnv — the provider chain', () => {
+  it('accepts a chain whose providers all have keys', () => {
+    const env = validateEnv({
+      ...base,
+      OPENROUTER_API_KEY: 'or-test',
+      LLM_CHAIN: 'openai:gpt-4.1-mini,openrouter:google/gemini-2.5-flash',
+    });
+
+    expect(env.LLM_CHAIN).toBe(
+      'openai:gpt-4.1-mini,openrouter:google/gemini-2.5-flash',
+    );
+  });
+
+  // Failing here rather than on the first request is the whole point: a
+  // missing key turns the fallback link into a link that always fails, and
+  // that is indistinguishable from a healthy chain until the primary breaks
+  // — which is exactly when the fallback was supposed to save you.
+  it('refuses a chain naming a provider with no key', () => {
+    expect(() =>
+      validateEnv({ ...base, LLM_CHAIN: 'openai:gpt-4.1-mini,openrouter:x' }),
+    ).toThrow(/OPENROUTER_API_KEY/);
+  });
+
+  it('refuses a malformed chain, reporting why the parser rejected it', () => {
+    expect(() => validateEnv({ ...base, LLM_CHAIN: 'openai:' })).toThrow(
+      /provider:model/i,
+    );
+  });
+
+  it('refuses a chain that repeats a provider:model pair', () => {
+    expect(() =>
+      validateEnv({ ...base, LLM_CHAIN: 'openai:m,openai:m' }),
+    ).toThrow(/repeated/i);
+  });
 });

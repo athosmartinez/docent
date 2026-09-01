@@ -183,4 +183,47 @@ describe('IngestionRepository', () => {
     expect(source?.status).toBe('failed');
     expect(source?.error).toContain('ECONNREFUSED');
   });
+
+  // CorpusVersion's soundness rests on a newly-ready source's updated_at
+  // exceeding every other ready source's — true under one monotonic clock,
+  // not guaranteed under two. A test comparing the written timestamp against
+  // the real wall clock would not catch a regression back to `new Date()`:
+  // on the same machine the application and database clocks are normally
+  // within milliseconds of each other, so both would pass. Faking the
+  // application's clock far away from the real time is what makes the two
+  // distinguishable — if this write used `new Date()`, updated_at would land
+  // in 1999; every other write in this file shares the identical
+  // `sql`now()`` expression, so this one write stands for all of them.
+  it("sets updated_at from Postgres's clock, not the application's", async () => {
+    const id = await repository.createSource(uri, 'docs');
+
+    // Fakes only Date — every real timer stays real, so the shared
+    // connection pool's own idle/keepalive timeouts (used by every other
+    // suite running concurrently against this same pool) are unaffected.
+    jest.useFakeTimers({
+      now: new Date('1999-01-01T00:00:00.000Z'),
+      doNotFake: [
+        'setTimeout',
+        'clearTimeout',
+        'setInterval',
+        'clearInterval',
+        'setImmediate',
+        'clearImmediate',
+        'nextTick',
+        'queueMicrotask',
+      ],
+    });
+    try {
+      await repository.markReady(id);
+    } finally {
+      jest.useRealTimers();
+    }
+
+    const source = await repository.findSource(id);
+    const secondsSinceRealNow =
+      (Date.now() - (source?.updated_at.getTime() ?? 0)) / 1000;
+
+    expect(source?.status).toBe('ready');
+    expect(secondsSinceRealNow).toBeLessThan(60);
+  });
 });

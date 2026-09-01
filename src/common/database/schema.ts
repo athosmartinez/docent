@@ -15,6 +15,19 @@ export const CHUNK_EMBEDDING_DIMENSIONS = 3072;
  */
 type VectorColumn = ColumnType<string, string, string>;
 
+/**
+ * `pg` returns a numeric column as a string, not a number — the same hazard
+ * the vector column has — because a numeric can exceed what a double holds
+ * without loss. Adding these in JavaScript without parsing concatenates them
+ * silently, so the column declares its string form explicitly and every
+ * reader converts at the edge.
+ */
+export type NumericColumn = ColumnType<
+  string,
+  number | string,
+  number | string
+>;
+
 export interface SourcesTable {
   id: Generated<string>;
   uri: string;
@@ -75,6 +88,20 @@ export interface CitationsTable {
   score: number;
 }
 
+export interface CostLedgerTable {
+  id: Generated<string>;
+  query_id: string;
+  provider: string;
+  model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: Generated<number>;
+  usd_cost: NumericColumn | null;
+  cost_source: string;
+  model_reason: string;
+  created_at: Generated<Date>;
+}
+
 /**
  * The Kysely schema interface, written by hand rather than generated, so that
  * types do not require a running database to produce. Tables are declared here
@@ -91,4 +118,5 @@ export interface DB {
   queries: QueriesTable;
   answers: AnswersTable;
   citations: CitationsTable;
+  cost_ledger: CostLedgerTable;
 }
