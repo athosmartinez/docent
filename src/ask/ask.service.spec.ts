@@ -435,6 +435,26 @@ describe('AskService', () => {
     expect(result.citations).toEqual([]);
     expect(complete).not.toHaveBeenCalled();
   });
+
+  // pgvector's cosine distance (`<=>`) returns NaN when the query vector has
+  // zero norm — measured directly against this corpus, not inferred. Every
+  // comparison against NaN is false, so a check written as "reject when too
+  // far" (`bestDistance > maxDistance`) silently falls through to "grounded"
+  // instead of refusing, however low maxDistance is set — this is what let a
+  // suite forcing maxDistance to -Infinity, specifically to guarantee a
+  // refusal on every question, still reach a real LLM call.
+  it('refuses when bestDistance is NaN, at any threshold including -Infinity', async () => {
+    const { service, complete } = build(
+      { chunks: [chunk('a')], bestDistance: Number.NaN },
+      Number.NEGATIVE_INFINITY,
+    );
+
+    const result = await service.ask('what does this fixture do?');
+
+    expect(result.grounded).toBe(false);
+    expect(result.citations).toEqual([]);
+    expect(complete).not.toHaveBeenCalled();
+  });
 });
 
 describe('AskService.recordStreamed', () => {
