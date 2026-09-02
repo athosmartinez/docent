@@ -83,15 +83,24 @@ export class AskService {
    * hallucinations, so the signal has to come from outside it. Distance is a
    * cost, not a score, so the comparison is against an upper bound: the
    * question is grounded when the nearest chunk is *within* the threshold.
+   *
+   * Written as that positive condition rather than as its negation
+   * (`bestDistance > this.maxDistance` ⇒ refuse) on purpose: every
+   * comparison against NaN is false, so the negated form silently falls
+   * through to "grounded" on a NaN distance, however low the threshold is
+   * set — including -Infinity, which exists specifically to force a refusal
+   * on every question. pgvector's cosine distance (`<=>`) returns NaN for a
+   * zero-norm query vector, measured directly against this corpus; written
+   * as "accept when within bound", the same false comparison instead makes
+   * `isGrounded` false, so NaN refuses like any other unmeasurable distance.
    */
   async retrieveGrounded(question: string): Promise<RetrievedChunk[] | null> {
     const { chunks, bestDistance } = await this.retrieval.search(question);
 
-    if (bestDistance === null || bestDistance > this.maxDistance) {
-      return null;
-    }
+    const isGrounded =
+      bestDistance !== null && bestDistance <= this.maxDistance;
 
-    return chunks;
+    return isGrounded ? chunks : null;
   }
 
   async ask(question: string): Promise<AskResult> {
